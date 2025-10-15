@@ -1,19 +1,6 @@
-# Motion Forecasting in Continuous Driving
+# Moe motion forecasting 
 
 
-> [**Motion Forecasting in Continuous Driving**](https://arxiv.org/abs/2410.06007)            
-> Nan Song, [Bozhou Zhang](https://zbozhou.github.io/), [Xiatian Zhu](https://surrey-uplab.github.io/), [Li Zhang](https://lzrobots.github.io)   
-> **NeurIPS 2024**
-
-## 🚗 Abstract
-Motion forecasting for agents in autonomous driving is highly challenging due to the numerous possibilities for each agent's next action and their complex interactions in space and time. In real applications, motion forecasting takes place repeatedly and continuously as the self-driving car moves. However, existing forecasting methods typically process each driving scene within a certain range independently, totally ignoring the situational and contextual relationships between successive driving scenes. This significantly simplifies the forecasting task, making the solutions suboptimal and inefficient to use in practice. To address this fundamental limitation, we propose a novel motion forecasting framework for continuous driving, named RealMotion. It comprises two integral streams both at the scene level: (1) The scene context stream progressively accumulates historical scene information until the present moment, capturing temporal interactive relationships among scene elements. (2) The agent trajectory stream optimizes current forecasting by sequentially relaying past predictions. Besides, a data reorganization strategy is introduced to narrow the gap between existing benchmarks and real-world applications, consistent with our network. These approaches enable exploiting more broadly the situational and progressive insights of dynamic motion across space and time. Extensive experiments on Argoverse series with different settings demonstrate that our RealMotion achieves state-of-the-art performance, along with the advantage of efficient real-world inference.
-
-## 🎞️ Pipeline
-<div align="center">
-  <img src="assets/pipeline.png"/>
-</div><br/>
-
-## 🛠️ Get started
 
 ### Set up a new virtual environment
 ```
@@ -71,28 +58,3 @@ python eval.py checkpoint=/path/to/ckpt
 # Test for submission
 python eval.py checkpoint=/path/to/ckpt submit=true
 ```
-
-## ⭐ Results and checkpoints
-
-| Models | minADE1 | minFDE1 | minADE6 | minFDE6 | b-minFDE6 | Checkpoint |
-| :-- | :-: | :-: | :-: | :-: | :--: | :-: |
-| RealMotion-I   |  1.808  |  4.510  |  0.728  |  1.420 | 2.043  | [remotion_i.pth](https://drive.google.com/file/d/1MY4OfoEdoqFTdfDrHqcmo1pAUgUz1Gea/view?usp=drive_link)
-| RealMotion |  1.646  |  4.100  |  0.669  |  1.303  | 1.935 |[remotion.pth](https://drive.google.com/file/d/1qyT0HHTMtpsvGy6YFo-jlp-1b-oNGbMr/view?usp=drive_link)
-
-
-
-
-## 📜 BibTeX
-```bibtex
-@inproceedings{song2024realmotion,
- title={Motion Forecasting in Continuous Driving},
- author={Song, Nan and Zhang, Bozhou and Zhu, Xiatian and Zhang, Li},
- booktitle={NeurIPS},
- year={2024},
-}
-```
-
-## ❤️ Acknowledgements
- - [Forecast-MAE](https://github.com/jchengai/forecast-mae)
- - [StreamPETR](https://github.com/exiawsh/StreamPETR)
- - [DeMo (Ours)](https://github.com/fudan-zvg/DeMo)
