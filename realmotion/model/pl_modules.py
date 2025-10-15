@@ -3,6 +3,7 @@ from pathlib import Path
 import pickle
 import random
 import pytorch_lightning as pl
+from realmotion.metrics.accuracy import CustomAccuracy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,6 +35,7 @@ class BaseLightningModule(pl.LightningModule):
                 'minFDE6': minFDE(k=6),
                 'MR': MR(),
                 'b-minFDE6': brier_minFDE(k=6),
+                'IntentAcc': CustomAccuracy()
             }
         )
 
@@ -532,11 +534,14 @@ class RegressionLightningModule(BaseLightningModule):
         # --- 循环结束，评估结果 ---
         # 选择最终概率最高的轨迹
         final_predictions = {'y_hat': [x[1][:, 0] for x in beams], 
-                             'pi': [torch.exp(x[0]) for x in beams]}
+                             'pi': [torch.exp(x[0]) for x in beams],
+                             "intent": [x[3] for x in beams]}
     
         final_predictions['y_hat'] = torch.stack(final_predictions['y_hat'], dim=1) # (B, beam_size, 60, 2)
         final_predictions['pi'] = torch.stack(final_predictions['pi'], dim=1)
         final_predictions['pi'] = torch.softmax(final_predictions['pi'], dim=-1)
+        final_predictions['intent'] = torch.stack(final_predictions['intent'], dim=1)
+        final_predictions['intent_target'] = data[0]['intent'][:,0,0]
         # 计算评估指标
 
         metrics = self.metrics(final_predictions, gt_full_future_traj[:, 0])
