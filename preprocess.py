@@ -17,9 +17,10 @@ def glob_files(data_root: Path, mode: str):
 def preprocess(args):
     batch = args.batch
     data_root = Path(args.data_root)
-
-    for mode in ["train", "val", "test"]:
-        save_dir = data_root / "realmotion_processed" / mode
+    save_root = Path("/gz-data")
+    for mode in [ "train" ]:
+        
+        save_dir = save_root / f"demo" / mode
         extractor = Av2Extractor(save_path=save_dir, mode=mode)
 
         save_dir.mkdir(exist_ok=True, parents=True)
@@ -35,10 +36,10 @@ def preprocess(args):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--data_root", "-d", type=str, default='data')
+    parser.add_argument("--data_root", "-d", type=str, default='/gz-data/argoverse2/')
     parser.add_argument("--batch", "-b", type=int, default=50)
     parser.add_argument("--parallel", "-p", action="store_true")
-    parser.add_argument("--num_workers", "-n", type=int, default=16)
+    parser.add_argument("--num_workers", "-n", type=int, default=64)
 
     args = parser.parse_args()
     preprocess(args)

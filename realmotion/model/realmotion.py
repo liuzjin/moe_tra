@@ -136,6 +136,8 @@ class RealMotion_I(nn.Module):
                                  lane_feat.new_zeros(*lane_feat.shape[:2])], dim=1).bool()
 
         x_encoder = x_encoder + pos_embed
+
+        
         if isinstance(self, RealMotion):
             # read memory for stream process
             if 'memory_dict' in data and data['memory_dict'] is not None:

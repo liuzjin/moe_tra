@@ -4,8 +4,8 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
-
-
+from av2.map.map_api import ArgoverseStaticMap
+from collections import Counter
 class Av2Dataset(Dataset):
     def __init__(
         self,
@@ -14,17 +14,31 @@ class Av2Dataset(Dataset):
         num_historical_steps: int = 50,
         split_points: List[int] = [50],
         radius: float = 150.0,
+        map_radius: float = 40.0,
+        n_step: int = 10,
         logger=None,
     ):
-        assert split_points[-1] == 50 and num_historical_steps <= 50
+        # assert split_points[-1] == 50 and num_historical_steps <= 50
         assert split in ['train', 'val', 'test']
         super(Av2Dataset, self).__init__()
         self.data_folder = Path(data_root) / split
         self.file_list = sorted(list(self.data_folder.glob('*.pt')))
         self.num_historical_steps = num_historical_steps
-        self.num_future_steps = 0 if split =='test' else 60
-        self.split_points = split_points
+        self.n_step = n_step
+        self.split = split
+        if split_points is None and n_step is not None:
+            if split == 'train':
+                self.split_points = list(range(50, 110, n_step))
+                self.num_future_steps = n_step 
+            else:
+                self.split_points = [50]
+                self.num_future_steps = 60
+        else:
+            self.split_points = split_points
+            self.num_future_steps = 0 if split =='test' else 60
         self.radius = radius
+        self.map_radius = map_radius
+    
 
         if logger is not None:
             logger.info(f'data root: {data_root}/{split}, total number of files: {len(self.file_list)}')
@@ -43,6 +57,87 @@ class Av2Dataset(Dataset):
             ag_dict = self.process_single_agent(data, cur_step)
             sequence_data.append(ag_dict)
         return sequence_data
+
+    def resample_intent_labels(self,
+        intent_sequence, 
+        num_segments,
+        intent_priority_list=None
+    ) :
+        """
+        将一个意图标签序列重新采样为指定数量的段。
+
+        该函数将原始序列划分为N个大致均匀的块，并为每个块确定一个代表性标签。
+        确定标签的规则是：
+        1. 选择该块中出现次数最多的标签（众数）。
+        2. 如果存在多个众数（出现次数相同），则根据提供的优先级列表选择优先级最高的那个。
+        3. 如果没有提供优先级列表，则简单地选择第一个出现的众数。
+
+        Args:
+            intent_sequence (List[int]): 原始的意图标签序列，例如 [0, 0, 1, 1, 2, 5]。
+            num_segments (int): 想要得到的新序列的长度（段数）。
+            intent_priority_list (List[int], optional):
+                一个定义了意图优先级的列表。列表中的标签优先级从高到低排列。
+                例如：[5, 2, 3, 4, 1, 0] 表示标签5(停止)的优先级最高，0(直行)最低。
+                这在处理平局时至关重要。Defaults to None.
+
+        Returns:
+            List[int]: 重新采样后的新意图标签序列，长度为 num_segments。
+
+        Raises:
+            ValueError: 如果 num_segments 大于原始序列的长度。
+        """
+        num_agent, original_length = intent_sequence.shape
+        if num_segments > original_length:
+            raise ValueError(f"目标段数 ({num_segments}) 不能大于原始序列长度 ({original_length})。")
+
+        batch_results = []
+        segment_boundaries = [round(i * original_length / num_segments) for i in range(num_segments + 1)]
+
+        for i in range(num_agent):
+            single_sequence = intent_sequence[i].tolist() # 转换为列表以便使用 Counter
+            new_single_sequence = []
+
+            for j in range(num_segments):
+                start_index = segment_boundaries[j]
+                end_index = segment_boundaries[j+1]
+                
+                # 提取当前块的子序列
+                segment_labels = single_sequence[start_index:end_index]
+
+                if not segment_labels:
+                    # 处理空块的情况
+                    if new_single_sequence:
+                        new_single_sequence.append(new_single_sequence[-1])
+                    else:
+                        new_single_sequence.append(single_sequence[0])
+                    continue
+
+                # 1. 统计块内每个标签的出现次数
+                counts = Counter(segment_labels)
+                max_count = max(counts.values())
+                
+                # 2. 找到所有出现次数最多的标签（众数）
+                modes = [label for label, count in counts.items() if count == max_count]
+
+                # 3. 根据规则选择最终标签
+                if len(modes) == 1:
+                    chosen_label = modes[0]
+                else:
+                    # 处理平局
+                    if intent_priority_list:
+                        # 按优先级列表排序，优先级高的在前
+                        modes.sort(key=lambda label: intent_priority_list.index(label))
+                        chosen_label = modes[0] # 选择优先级最高的那个
+                    else:
+                        # 如果没有优先级，简单选择数值最小的那个以保证确定性
+                        chosen_label = min(modes)
+                
+                new_single_sequence.append(chosen_label)
+            
+            batch_results.append(new_single_sequence)
+            
+        # 将结果列表转换为张量，并确保它在原始设备上
+        return torch.tensor(batch_results, dtype=torch.long, device=intent_sequence.device)
 
     def process_single_agent(self, data, step=50):
         idx = data['focal_idx']
@@ -70,7 +165,19 @@ class Av2Dataset(Dataset):
         vel = torch.cat([vel[[idx]], vel[ag_mask]])
         valid_mask = data['x_valid_mask'][:, st: ed]
         valid_mask = torch.cat([valid_mask[[idx]], valid_mask[ag_mask]])
-
+        
+        intent_series = data['driving_intent_sequence'][self.n_step]
+        if self.n_step is not None:
+            if self.split == 'train':
+                k = (step - self.num_historical_steps) // self.n_step
+                intent = intent_series[:, [k]]
+                intent = torch.cat([intent[[idx]], intent[ag_mask]])
+            else:
+                intent = intent_series
+                intent = torch.cat([intent[[idx]], intent[ag_mask]])
+        else:
+           intent = torch.ones(pos.shape[0], 1, dtype=torch.long) * 8
+        
         pos[valid_mask] = torch.matmul(pos[valid_mask] - origin, rotate_mat)
         head[valid_mask] = (head[valid_mask] - theta + np.pi) % (2 * np.pi) - np.pi
 
@@ -85,10 +192,13 @@ class Av2Dataset(Dataset):
             l_pos[:, 10, 1] - l_pos[:, 9, 1],
             l_pos[:, 10, 0] - l_pos[:, 9, 0],
         )
-        l_valid_mask = (
-            (l_pos[:, :, 0] > -self.radius) & (l_pos[:, :, 0] < self.radius)
-            & (l_pos[:, :, 1] > -self.radius) & (l_pos[:, :, 1] < self.radius)
-        )
+        if self.map_radius != 0:
+            l_valid_mask = (
+                (l_pos[:, :, 0] > -self.map_radius) & (l_pos[:, :, 0] < self.map_radius)
+                & (l_pos[:, :, 1] > -self.map_radius) & (l_pos[:, :, 1] < self.map_radius)
+            )
+        else:
+            l_valid_mask = torch.ones(l_pos.size(0), l_pos.size(1), dtype=torch.bool)
 
         l_mask = l_valid_mask.any(dim=-1)
         l_pos = l_pos[l_mask]
@@ -105,13 +215,21 @@ class Av2Dataset(Dataset):
         # remove outliers
         nearest_dist = torch.cdist(pos[:, self.num_historical_steps - 1, :2],
                                    l_pos.view(-1, 2)).min(dim=1).values
-        ag_mask = nearest_dist < 5
-        ag_mask[0] = True
-        pos = pos[ag_mask]
-        head = head[ag_mask]
-        vel = vel[ag_mask]
-        attr = attr[ag_mask]
-        valid_mask = valid_mask[ag_mask]
+        ag_mask2 = nearest_dist < 5
+        ag_mask2[0] = True
+        pos = pos[ag_mask2]
+        head = head[ag_mask2]
+        vel = vel[ag_mask2]
+        attr = attr[ag_mask2]
+        valid_mask = valid_mask[ag_mask2]
+
+        intent = intent[ag_mask2]
+
+        initial_selected_indices = torch.cat([torch.tensor([idx]), torch.where(ag_mask)[0]])
+        # 然后记录经过第二次筛选后的相对索引
+        final_selected_mask = ag_mask2
+        # 最终保留的原始索引
+        original_indices = initial_selected_indices[final_selected_mask]
 
         # post_process
         head = head[:, :self.num_historical_steps]
@@ -146,33 +264,35 @@ class Av2Dataset(Dataset):
         )
         vel[:, 0] = torch.zeros(vel.size(0))
 
+        
         return {
-            'target': target,
-            'target_mask': target_mask,
-            'x_positions_diff': pos,
-            'x_positions': tmp_pos,
-            'x_attr': attr,
-            'x_centers': pos_ctr,
-            'x_angles': head,
-            'x_velocity': tmp_vel,
-            'x_velocity_diff': vel,
-            'x_valid_mask': valid_mask,
-            'lane_positions': l_pos,
-            'lane_centers': l_ctr,
-            'lane_angles': l_head,
-            'lane_attr': l_attr,
-            'lane_valid_mask': l_valid_mask,
-            'is_intersections': l_is_int,
-            'origin': origin.view(1, 2),
-            'theta': theta.view(1),
-            'scenario_id': data['scenario_id'],
+            'target': target,                  #[23, 60, 2]
+            'target_mask': target_mask,        #[23, 60]
+            'x_positions_diff': pos,           #[23, 50, 2]
+            'x_positions': tmp_pos,            #[23, 50, 2]
+            'x_attr': attr,                    #[23, 3]
+            'x_centers': pos_ctr,              #[23, 2]                            
+            'x_angles': head,                  #[23, 50]
+            'x_velocity': tmp_vel,             #[23, 50]
+            'x_velocity_diff': vel,            #[23, 50]
+            'x_valid_mask': valid_mask,        #[23, 50]
+            'lane_positions': l_pos,           #[20, 20, 2]
+            'lane_centers': l_ctr,             #[20, 2]
+            'lane_angles': l_head,             #[20]
+            'lane_attr': l_attr,               #[20, 3]
+            'lane_valid_mask': l_valid_mask,   #[20, 20]
+            'is_intersections': l_is_int,      #[20]
+            'origin': origin.view(1, 2),       #[1, 2]
+            'theta': theta.view(1),            #[1]
+            'scenario_id': data['scenario_id'],#str
             'track_id': cur_agent_id,
             'city': data['city'],
-            'timestamp': torch.Tensor([step * 0.1])
+            'timestamp': torch.Tensor([step * 0.1]),
+            'driving_intent': intent,
+            'agent_indices': original_indices,
         }
 
-        
-
+    
 def collate_fn(seq_batch):
     seq_data = []
     for i in range(len(seq_batch[0])):
@@ -220,5 +340,10 @@ def collate_fn(seq_batch):
         data['origin'] = torch.cat([b['origin'] for b in batch], dim=0)
         data['theta'] = torch.cat([b['theta'] for b in batch])
         data['timestamp'] = torch.cat([b['timestamp'] for b in batch])
+        
+        if batch[0]['target'] is not None:
+            data['intent'] = pad_sequence([b['driving_intent'] for b in batch], batch_first=True)
+        if 'agent_indices' in batch[0]:
+            data['agent_indices'] = [b['agent_indices'] for b in batch]
         seq_data.append(data)
     return seq_data

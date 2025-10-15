@@ -1,7 +1,12 @@
 defaults:
   - _self_
-  - datamodule: av2_stream
-  - model: RealMotion
+  - datamodule: av2_moe
+  - model: MoeMotion_I
+
+# defaults:
+#   - _self_
+#   - datamodule: av2_stream
+#   - model: RealMotion
 
 hydra:
   run:
@@ -14,12 +19,13 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 4
+gpus: 6
 batch_size: 32
-epochs: 80
+epochs: 100
 checkpoint:
 submit:
-
+n_step: 60
+top_k: 6
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
@@ -33,6 +39,12 @@ callbacks:
   - _target_: pytorch_lightning.callbacks.RichProgressBar
   - _target_: pytorch_lightning.callbacks.LearningRateMonitor
     logging_interval: epoch
+  - _target_: pytorch_lightning.callbacks.EarlyStopping
+    monitor: minADE6
+    patience: 30
+    mode: min
+    verbose: true
+    min_delta: 0.001
   
 trainer:
   max_epochs: ${epochs}
@@ -43,5 +55,6 @@ trainer:
   gradient_clip_algorithm: norm
   sync_batchnorm: true
   default_root_dir: ${output_dir}
+  fast_dev_run: 0
 
 
