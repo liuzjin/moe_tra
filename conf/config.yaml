@@ -19,12 +19,12 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 1
-batch_size: 32
+gpus: 3
+batch_size: 60
 epochs: 100
-checkpoint: outputs/MoeMotion_I-av2_3frame_30his/20251014-111147/checkpoints/epoch_45-minADE6_1.0773651599884033.ckpt
+checkpoint: 
 submit:
-n_step: 60
+n_step: 20
 top_k: 6
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
@@ -46,6 +46,7 @@ callbacks:
     verbose: true
     min_delta: 0.001
   
+  
 trainer:
   max_epochs: ${epochs}
   accelerator: gpu
@@ -56,5 +57,7 @@ trainer:
   sync_batchnorm: true
   default_root_dir: ${output_dir}
   fast_dev_run: 0
+  num_sanity_val_steps: 0
+  detect_anomaly: False
 
 

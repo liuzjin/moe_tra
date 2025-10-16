@@ -360,6 +360,13 @@ def get_teacher_forcing_ratio(
             f"Please choose from 'linear', 'exponential', or 'inverse_sigmoid'."
         )
 
+
+def nan_hook(module, input, output):
+    if isinstance(output, torch.Tensor) and torch.any(torch.isnan(output)):
+        print(f"NaN found in the output of layer: {module}")
+        # 在这里可以设置一个断点或者抛出异常来中断程序
+        # import pdb; pdb.set_trace()
+
 class RegressionLightningModule(BaseLightningModule):
     def __init__(self,
                  total_epochs=100,
@@ -381,6 +388,9 @@ class RegressionLightningModule(BaseLightningModule):
         self.initial_ss_ratio = 1.0 # 初始teacher forcing概率
         self.final_ss_ratio = 0.1   # 最终teacher forcing概率
         self.schedule_type = schedule_type
+
+        for name, module in self.model.named_modules():
+            module.register_forward_hook(nan_hook)
     
     def forward(self, data, mode):
         return self.model(data, mode)
@@ -396,6 +406,8 @@ class RegressionLightningModule(BaseLightningModule):
         
         # 1. 门控损失 (分类)
         gating_loss = F.cross_entropy(probs, gt_action)
+        if gating_loss.isinf():
+            print("gating_loss is Inf!")
         
         # 2. 回归损失 ("最佳匹配者负责制")
         gt_expanded = gt_segment.unsqueeze(1) # -> (B, 1, T, 2)
@@ -434,12 +446,10 @@ class RegressionLightningModule(BaseLightningModule):
         # self.log('train/teacher_forcing_ratio', teacher_forcing_ratio, on_step=False, on_epoch=True)
         batch_size = data[0]['x_positions'].shape[0]  # 获取批次大小
         self.log('train/teacher_forcing_ratio', teacher_forcing_ratio, on_step=False, on_epoch=True, batch_size=batch_size, sync_dist=True)
-        memory = None
+        
         total_loss = 0.0 
         current_input = data[0]   
         for i in range(self.n):
-            
-            current_input['memory'] = memory
 
             out = self(current_input, True)
             if current_input['target'].shape[1] != out['y_hat_others'].shape[1]+1:
@@ -447,8 +457,10 @@ class RegressionLightningModule(BaseLightningModule):
                     f"Expected output shape: {out['y_hat']['predictions'].shape[1]}, "
                     f"but got {current_input['target'].shape[1]}"
                 )
+            self.last_input = current_input
             loss, loss_dict = self.cal_loss(out,current_input, tag=f'step{i}_')
-            
+            if torch.isnan(loss):
+                print(batch_idx)
                 
             
             self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
@@ -456,8 +468,6 @@ class RegressionLightningModule(BaseLightningModule):
 
             if i == self.n - 1:
                 break
-
-            memory = out.get('memory_dict', None)
 
             # use_teacher_forcing = (random.random() < teacher_forcing_ratio)
             use_teacher_forcing = False
@@ -519,12 +529,12 @@ class RegressionLightningModule(BaseLightningModule):
 
                     if trajectories is None:
                         trajectories_pred = pred
-                        expert = expert_idx
+                        expert_pred = expert_idx
                     else:
                         trajectories_pred = torch.cat([trajectories, pred], dim=2)
-                        expert = torch.cat([expert, expert_idx], dim=1)
+                        expert_pred = torch.cat([expert, expert_idx], dim=1)
                     
-                    all_new_beams.append((new_log_probs, trajectories_pred, next_input,  expert))
+                    all_new_beams.append((new_log_probs, trajectories_pred, next_input,  expert_pred))
             
             # --- 筛选 Top-K Beams ---
             # 根据累积概率排序
@@ -541,7 +551,7 @@ class RegressionLightningModule(BaseLightningModule):
         final_predictions['pi'] = torch.stack(final_predictions['pi'], dim=1)
         final_predictions['pi'] = torch.softmax(final_predictions['pi'], dim=-1)
         final_predictions['intent'] = torch.stack(final_predictions['intent'], dim=1)
-        final_predictions['intent_target'] = data[0]['intent'][:,0,0]
+        final_predictions['intent_target'] = data[0]['intent'][:,0]
         # 计算评估指标
 
         metrics = self.metrics(final_predictions, gt_full_future_traj[:, 0])
@@ -568,6 +578,98 @@ class RegressionLightningModule(BaseLightningModule):
             sync_dist=True,
         )
     
+    # def on_after_backward(self):
+    #     for name, param in self.named_parameters():
+    #         if param.grad is not None:
+    #             if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+    #                 print(f"!!! NaN/Inf gradient detected in parameter: {name} !!!")
+    #                 # 在这里，你仍然可以访问 self.current_batch (如果保存了的话)
+    #                 # 这说明当前批次的数据导致了梯度爆炸
+    #                 # 注意：需要自己保存当前批次，因为 on_after_backward 没有 batch 参数
+    # def on_before_optimizer_step(self, optimizer):
+    #     """优化器步骤前的检查"""
+    #     # 检查梯度
+    #     total_norm = 0
+    #     nan_grad_count = 0
+        
+    #     for name, param in self.named_parameters():
+    #         if param.grad is not None:
+    #             if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+    #                 nan_grad_count += 1
+    #                 print(f"🚨 梯度问题在: {name}")
+    #                 # 分析当前导致问题的batch
+    #                 if hasattr(self, 'current_batch'):
+    #                     self._analyze_problematic_batch()
+    #             else:
+    #                 param_norm = param.grad.detach().data.norm(2)
+    #                 total_norm += param_norm.item() ** 2
+        
+    #     total_norm = total_norm ** 0.5
+    #     print(f"梯度范数: {total_norm:.6f}, 有问题的梯度数: {nan_grad_count}")
+        
+    #     # 梯度裁剪
+    #     if total_norm > 1.0:  # 调整阈值
+    #         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+    
+    # def _check_batch_data(self, batch, batch_idx, context):
+    #     """检查batch数据"""
+    #     def check_tensor(tensor, name):
+    #         if torch.is_tensor(tensor):
+    #             has_nan = torch.isnan(tensor).any()
+    #             has_inf = torch.isinf(tensor).any()
+    #             if has_nan or has_inf:
+    #                 print(f"🚨 {context} - Batch {batch_idx} - {name}: "
+    #                       f"NaN={has_nan}, Inf={has_inf}")
+    #             # 检查极端值
+    #             if tensor.numel() > 0:
+    #                 max_val = tensor.max().item()
+    #                 min_val = tensor.min().item()
+    #                 if abs(max_val) > 1e6 or abs(min_val) > 1e6:
+    #                     print(f"⚠️  {context} - Batch {batch_idx} - {name}: "
+    #                           f"极端值 range=({min_val:.6f}, {max_val:.6f})")
+        
+    #     if torch.is_tensor(batch):
+    #         check_tensor(batch, "数据")
+    #     elif isinstance(batch, (list, tuple)):
+    #         for i, item in enumerate(batch):
+    #             check_tensor(item, f"item_{i}")
+    #     elif isinstance(batch, dict):
+    #         for key, value in batch.items():
+    #             check_tensor(value, f"key_{key}")
+    
+    # def _analyze_problematic_batch(self):
+    #     """分析导致问题的batch"""
+    #     if not hasattr(self, 'current_batch') or self.current_batch is None:
+    #         return
+            
+    #     batch = self.current_batch
+    #     batch_idx = getattr(self, 'current_batch_idx', 'unknown')
+        
+    #     print(f"\n🔍 分析问题Batch {batch_idx}:")
+        
+    #     if torch.is_tensor(batch):
+    #         self._print_tensor_stats(batch, "数据")
+    #     elif isinstance(batch, (list, tuple)):
+    #         for i, item in enumerate(batch):
+    #             if torch.is_tensor(item):
+    #                 self._print_tensor_stats(item, f"输入[{i}]")
+    #     elif isinstance(batch, dict):
+    #         for key, value in batch.items():
+    #             if torch.is_tensor(value):
+    #                 self._print_tensor_stats(value, f"输入[{key}]")
+    
+    # def _print_tensor_stats(self, tensor, name):
+        """打印张量统计信息"""
+        print(f"  {name}: shape={tuple(tensor.shape)}")
+        print(f"    范围: [{tensor.min().item():.8f}, {tensor.max().item():.8f}]")
+        print(f"    均值: {tensor.mean().item():.8f} ± {tensor.std().item():.8f}")
+        
+        # 检查数值分布
+        if tensor.numel() > 0:
+            abs_tensor = tensor.abs()
+            large_vals = (abs_tensor > 1000).sum().item()
+            if large_vals > 0:
+                print(f"    ⚠️  有 {large_vals} 个绝对值大于1000的值")
     
     def test_step(self, data, batch_idx) -> None:
         memory_dict = None
@@ -745,9 +847,12 @@ class RegressionLightningModule(BaseLightningModule):
         
         # --- 【修正】只定义需要我们手动更新和对齐的 agent-wise 键 ---
         # 移除了 'target', 'target_mask', 'intent'
+        # agent_wise_keys_to_align = [
+        #     'x_positions', 'x_centers', 'x_positions_diff', 'x_angles',
+        #     'x_velocity', 'x_velocity_diff', 'x_valid_mask', 'x_attr'
+        # ]
         agent_wise_keys_to_align = [
-            'x_positions', 'x_centers', 'x_positions_diff', 'x_angles',
-            'x_velocity', 'x_velocity_diff', 'x_valid_mask', 'x_attr'
+            'x_positions'
         ]
 
         # 收集最终批次数据的列表
@@ -771,13 +876,13 @@ class RegressionLightningModule(BaseLightningModule):
                     old_idx = old_id_to_idx[agent_id]
                     
                     rows_to_stack['x_positions'].append(updated_positions[i, old_idx])
-                    rows_to_stack['x_centers'].append(updated_centers[i, old_idx])
-                    rows_to_stack['x_positions_diff'].append(updated_positions_diff[i, old_idx])
-                    rows_to_stack['x_angles'].append(updated_angles[i, old_idx])
-                    rows_to_stack['x_velocity'].append(updated_velocity[i, old_idx])
-                    rows_to_stack['x_velocity_diff'].append(updated_velocity_diff[i, old_idx])
-                    rows_to_stack['x_valid_mask'].append(updated_valid_mask[i, old_idx])
-                    rows_to_stack['x_attr'].append(state['x_attr'][i, old_idx])
+                    # rows_to_stack['x_centers'].append(updated_centers[i, old_idx])
+                    # rows_to_stack['x_positions_diff'].append(updated_positions_diff[i, old_idx])
+                    # rows_to_stack['x_angles'].append(updated_angles[i, old_idx])
+                    # rows_to_stack['x_velocity'].append(updated_velocity[i, old_idx])
+                    # rows_to_stack['x_velocity_diff'].append(updated_velocity_diff[i, old_idx])
+                    # rows_to_stack['x_valid_mask'].append(updated_valid_mask[i, old_idx])
+                    # rows_to_stack['x_attr'].append(state['x_attr'][i, old_idx])
                     
                 else:
                     # --- Case 2: 新出现的智能体 -> 直接复制 next_state 的状态 ---
@@ -806,6 +911,13 @@ class RegressionLightningModule(BaseLightningModule):
         final_state_padded['target'] = next_state['target']
         final_state_padded['target_mask'] = next_state['target_mask']
         final_state_padded['intent'] = next_state['intent']
+        final_state_padded['x_centers'] = next_state['x_centers']
+        final_state_padded['x_positions_diff'] = next_state['x_positions_diff']
+        final_state_padded['x_angles'] = next_state['x_angles']
+        final_state_padded['x_velocity'] = next_state['x_velocity']
+        final_state_padded['x_velocity_diff'] = next_state['x_velocity_diff']
+        final_state_padded['x_valid_mask'] = next_state['x_valid_mask']
+        final_state_padded['x_attr'] = next_state['x_attr']
 
         # --- 处理场景级别的元数据 ---
         final_state_padded['origin'] = new_origin

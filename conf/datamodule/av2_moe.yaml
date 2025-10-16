@@ -6,7 +6,7 @@ pl_module:
   data_root: /data/demo
   train_batch_size: ${batch_size}
   test_batch_size: ${batch_size}
-  shuffle: True
+  shuffle: False
   num_workers: 24
   pin_memory: True
   dataset:

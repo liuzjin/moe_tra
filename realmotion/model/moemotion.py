@@ -134,29 +134,30 @@ class MoeMotion_I(nn.Module):
         x_angles = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
         pos_feat = torch.cat([x_centers, x_angles], dim=-1)
         pos_embed = self.pos_embed(pos_feat)
-
+        # if pos_embed.isnan().any() :
+        #     print("x_encoder is NaN!")
         actor_type_embed = self.actor_type_embed[data['x_attr'][..., 2].long()]
-        if actor_type_embed.isnan().any() :
-            print("x_encoder is NaN!")
+        # if actor_type_embed.isnan().any() :
+        #     print("x_encoder is NaN!")
         lane_type_embed = self.lane_type_embed.repeat(B, M, 1)
         actor_feat += actor_type_embed
         lane_feat += lane_type_embed
-        if actor_feat.isnan().any() :
-            print("x_encoder is NaN!")
-        if lane_feat.isnan().any() :
-            print("x_encoder is NaN!")
+        # if actor_feat.isnan().any() :
+        #     print("x_encoder is NaN!")
+        # if lane_feat.isnan().any() :
+        #     print("x_encoder is NaN!")
         x_encoder = torch.cat([actor_feat, lane_feat], dim=1)
         key_valid_mask = torch.cat(
             [data['x_key_valid_mask'], data['lane_key_valid_mask']], dim=1
         )
         x_type_mask = torch.cat([actor_feat.new_ones(*actor_feat.shape[:2]),
                                  lane_feat.new_zeros(*lane_feat.shape[:2])], dim=1).bool()
-        if x_encoder.isnan().any() :
-            print("x_encoder is NaN!")
+        # if x_encoder.isnan().any() :
+        #     print("x_encoder is NaN!")
         x_encoder = x_encoder + pos_embed
 
-        if x_encoder.isnan().any() :
-            print("x_encoder is NaN!")
+        # if x_encoder.isnan().any() :
+        #     print("x_encoder is NaN!")
         if isinstance(self, MoeMotion):
             # read memory for stream process
             if 'memory_dict' in data and data['memory_dict'] is not None:
@@ -188,8 +189,8 @@ class MoeMotion_I(nn.Module):
         for blk in self.blocks:
             x_encoder = blk(x_encoder, key_padding_mask=~key_valid_mask)
         x_encoder = self.norm(x_encoder)
-        if x_encoder.isnan().any() :
-            print("x_encoder is NaN!")
+        # if x_encoder.isnan().any() :
+        #     print("x_encoder is NaN!")
 
         y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask)
         
