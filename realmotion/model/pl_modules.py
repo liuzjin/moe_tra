@@ -469,8 +469,8 @@ class RegressionLightningModule(BaseLightningModule):
             if i == self.n - 1:
                 break
 
-            use_teacher_forcing = (random.random() < teacher_forcing_ratio)
-            # use_teacher_forcing = False
+            # use_teacher_forcing = (random.random() < teacher_forcing_ratio)
+            use_teacher_forcing = True
             if use_teacher_forcing:
                 current_input = data[i+1]
             else:
@@ -555,19 +555,6 @@ class RegressionLightningModule(BaseLightningModule):
         # 计算评估指标
 
         metrics = self.metrics(final_predictions, gt_full_future_traj[:, 0])
-        
-        # unique_metrics = {
-        # f"val_epoch{self.current_epoch}_step{self.global_step}/{k}": v 
-        # for k, v in metrics.items()
-        # }
-        
-        # self.log_dict(
-        #     unique_metrics,  # 使用带唯一标识符的指标
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     sync_dist=True,
-        # )
 
         self.log_dict(
             metrics,
@@ -915,7 +902,7 @@ class RegressionLightningModule(BaseLightningModule):
         # final_state_padded['x_positions_diff'] = next_state['x_positions_diff']
         # final_state_padded['x_angles'] = next_state['x_angles']
         # final_state_padded['x_velocity'] = next_state['x_velocity']
-        # # final_state_padded['x_velocity_diff'] = next_state['x_velocity_diff']
+        # final_state_padded['x_velocity_diff'] = next_state['x_velocity_diff']
         # final_state_padded['x_valid_mask'] = next_state['x_valid_mask']
         # final_state_padded['x_attr'] = next_state['x_attr']
 
