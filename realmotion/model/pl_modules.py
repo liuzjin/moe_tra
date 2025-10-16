@@ -469,8 +469,8 @@ class RegressionLightningModule(BaseLightningModule):
             if i == self.n - 1:
                 break
 
-            # use_teacher_forcing = (random.random() < teacher_forcing_ratio)
-            use_teacher_forcing = False
+            use_teacher_forcing = (random.random() < teacher_forcing_ratio)
+            # use_teacher_forcing = False
             if use_teacher_forcing:
                 current_input = data[i+1]
             else:
@@ -659,17 +659,17 @@ class RegressionLightningModule(BaseLightningModule):
     #                 self._print_tensor_stats(value, f"输入[{key}]")
     
     # def _print_tensor_stats(self, tensor, name):
-        """打印张量统计信息"""
-        print(f"  {name}: shape={tuple(tensor.shape)}")
-        print(f"    范围: [{tensor.min().item():.8f}, {tensor.max().item():.8f}]")
-        print(f"    均值: {tensor.mean().item():.8f} ± {tensor.std().item():.8f}")
+        # """打印张量统计信息"""
+        # print(f"  {name}: shape={tuple(tensor.shape)}")
+        # print(f"    范围: [{tensor.min().item():.8f}, {tensor.max().item():.8f}]")
+        # print(f"    均值: {tensor.mean().item():.8f} ± {tensor.std().item():.8f}")
         
-        # 检查数值分布
-        if tensor.numel() > 0:
-            abs_tensor = tensor.abs()
-            large_vals = (abs_tensor > 1000).sum().item()
-            if large_vals > 0:
-                print(f"    ⚠️  有 {large_vals} 个绝对值大于1000的值")
+        # # 检查数值分布
+        # if tensor.numel() > 0:
+        #     abs_tensor = tensor.abs()
+        #     large_vals = (abs_tensor > 1000).sum().item()
+        #     if large_vals > 0:
+        #         print(f"    ⚠️  有 {large_vals} 个绝对值大于1000的值")
     
     def test_step(self, data, batch_idx) -> None:
         memory_dict = None
@@ -847,13 +847,13 @@ class RegressionLightningModule(BaseLightningModule):
         
         # --- 【修正】只定义需要我们手动更新和对齐的 agent-wise 键 ---
         # 移除了 'target', 'target_mask', 'intent'
-        # agent_wise_keys_to_align = [
-        #     'x_positions', 'x_centers', 'x_positions_diff', 'x_angles',
-        #     'x_velocity', 'x_velocity_diff', 'x_valid_mask', 'x_attr'
-        # ]
         agent_wise_keys_to_align = [
-            'x_positions'
+            'x_positions', 'x_centers', 'x_positions_diff', 'x_angles',
+            'x_velocity', 'x_velocity_diff', 'x_valid_mask', 'x_attr',
         ]
+        # agent_wise_keys_to_align = [
+        #     'x_positions', 'x_velocity_diff'
+        # ]
 
         # 收集最终批次数据的列表
         final_tensors_list = {key: [] for key in agent_wise_keys_to_align}
@@ -876,13 +876,13 @@ class RegressionLightningModule(BaseLightningModule):
                     old_idx = old_id_to_idx[agent_id]
                     
                     rows_to_stack['x_positions'].append(updated_positions[i, old_idx])
-                    # rows_to_stack['x_centers'].append(updated_centers[i, old_idx])
-                    # rows_to_stack['x_positions_diff'].append(updated_positions_diff[i, old_idx])
-                    # rows_to_stack['x_angles'].append(updated_angles[i, old_idx])
-                    # rows_to_stack['x_velocity'].append(updated_velocity[i, old_idx])
-                    # rows_to_stack['x_velocity_diff'].append(updated_velocity_diff[i, old_idx])
-                    # rows_to_stack['x_valid_mask'].append(updated_valid_mask[i, old_idx])
-                    # rows_to_stack['x_attr'].append(state['x_attr'][i, old_idx])
+                    rows_to_stack['x_centers'].append(updated_centers[i, old_idx])
+                    rows_to_stack['x_positions_diff'].append(updated_positions_diff[i, old_idx])
+                    rows_to_stack['x_angles'].append(updated_angles[i, old_idx])
+                    rows_to_stack['x_velocity'].append(updated_velocity[i, old_idx])
+                    rows_to_stack['x_velocity_diff'].append(updated_velocity_diff[i, old_idx])
+                    rows_to_stack['x_valid_mask'].append(updated_valid_mask[i, old_idx])
+                    rows_to_stack['x_attr'].append(state['x_attr'][i, old_idx])
                     
                 else:
                     # --- Case 2: 新出现的智能体 -> 直接复制 next_state 的状态 ---
@@ -911,13 +911,13 @@ class RegressionLightningModule(BaseLightningModule):
         final_state_padded['target'] = next_state['target']
         final_state_padded['target_mask'] = next_state['target_mask']
         final_state_padded['intent'] = next_state['intent']
-        final_state_padded['x_centers'] = next_state['x_centers']
-        final_state_padded['x_positions_diff'] = next_state['x_positions_diff']
-        final_state_padded['x_angles'] = next_state['x_angles']
-        final_state_padded['x_velocity'] = next_state['x_velocity']
-        final_state_padded['x_velocity_diff'] = next_state['x_velocity_diff']
-        final_state_padded['x_valid_mask'] = next_state['x_valid_mask']
-        final_state_padded['x_attr'] = next_state['x_attr']
+        # final_state_padded['x_centers'] = next_state['x_centers']
+        # final_state_padded['x_positions_diff'] = next_state['x_positions_diff']
+        # final_state_padded['x_angles'] = next_state['x_angles']
+        # final_state_padded['x_velocity'] = next_state['x_velocity']
+        # # final_state_padded['x_velocity_diff'] = next_state['x_velocity_diff']
+        # final_state_padded['x_valid_mask'] = next_state['x_valid_mask']
+        # final_state_padded['x_attr'] = next_state['x_attr']
 
         # --- 处理场景级别的元数据 ---
         final_state_padded['origin'] = new_origin

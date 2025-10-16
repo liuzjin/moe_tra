@@ -19,12 +19,12 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 3
-batch_size: 60
+gpus: 6
+batch_size: 48
 epochs: 100
 checkpoint: 
 submit:
-n_step: 20
+n_step: 30
 top_k: 6
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint

@@ -3,10 +3,10 @@ tag: av2_3frame_30his
 pl_module:
   _target_: realmotion.datamodules.av2_datamodule.Av2DataModule
 
-  data_root: /data/demo
+  data_root: /gz-data/demo
   train_batch_size: ${batch_size}
   test_batch_size: ${batch_size}
-  shuffle: False
+  shuffle: True
   num_workers: 24
   pin_memory: True
   dataset:
