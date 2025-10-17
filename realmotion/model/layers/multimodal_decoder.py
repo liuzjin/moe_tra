@@ -38,10 +38,14 @@ class MultimodalDecoder(nn.Module):
         loc = self.loc(x).view(-1, 6, self.future_steps, 2)
         if self.return_prob:
             pi = self.pi(x).squeeze(-1)
+            pi = pi.softmax(dim=-1)
         else:
             pi = None
 
-        return loc, pi, x
+        
+        return {"predictions": loc, # (B, top_k, T, 2) -> Top-K的轨迹
+                "probs": pi, 
+                 "mode": x }
     
 class MLPExpert(nn.Module):
     def __init__(self, d_model: int, prediction_horizon: int):

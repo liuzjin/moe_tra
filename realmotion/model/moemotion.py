@@ -21,6 +21,7 @@ class MoeMotion_I(nn.Module):
         qkv_bias=False,
         drop_path=0.2,
         future_steps=60,
+        moe=True,
         use_transformer_decoder=False,
         query_cross_layers=2,
         query_self_layers=1,
@@ -55,19 +56,22 @@ class MoeMotion_I(nn.Module):
 
         self.actor_type_embed = nn.Parameter(torch.Tensor(4, embed_dim))
         self.lane_type_embed = nn.Parameter(torch.Tensor(1, 1, embed_dim))
-
-        if use_transformer_decoder:
-            self.decoder = QueryBasedMoeDecoder(
-                dim=embed_dim, 
-                mlp_ratio = mlp_ratio,
-                qkv_bias = qkv_bias,
-                query_cross_layers=query_cross_layers,
-                query_self_layers=query_self_layers,
-                future_steps=future_steps, 
-                num_experts=num_experts, 
-                top_k=top_k)
+        self.moe = moe
+        if moe:
+            if use_transformer_decoder:
+                self.decoder = QueryBasedMoeDecoder(
+                    dim=embed_dim, 
+                    mlp_ratio = mlp_ratio,
+                    qkv_bias = qkv_bias,
+                    query_cross_layers=query_cross_layers,
+                    query_self_layers=query_self_layers,
+                    future_steps=future_steps, 
+                    num_experts=num_experts, 
+                    top_k=top_k)
+            else:
+                self.decoder = MoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k)
         else:
-            self.decoder = MoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k)
+            self.decoder = MultimodalDecoder(embed_dim, future_steps)
         self.dense_predictor = nn.Sequential(
             nn.Linear(embed_dim, 256), nn.ReLU(), nn.Linear(256, future_steps * 2)
         )
@@ -134,30 +138,20 @@ class MoeMotion_I(nn.Module):
         x_angles = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
         pos_feat = torch.cat([x_centers, x_angles], dim=-1)
         pos_embed = self.pos_embed(pos_feat)
-        # if pos_embed.isnan().any() :
-        #     print("x_encoder is NaN!")
         actor_type_embed = self.actor_type_embed[data['x_attr'][..., 2].long()]
-        # if actor_type_embed.isnan().any() :
-        #     print("x_encoder is NaN!")
+       
         lane_type_embed = self.lane_type_embed.repeat(B, M, 1)
         actor_feat += actor_type_embed
         lane_feat += lane_type_embed
-        # if actor_feat.isnan().any() :
-        #     print("x_encoder is NaN!")
-        # if lane_feat.isnan().any() :
-        #     print("x_encoder is NaN!")
+
         x_encoder = torch.cat([actor_feat, lane_feat], dim=1)
         key_valid_mask = torch.cat(
             [data['x_key_valid_mask'], data['lane_key_valid_mask']], dim=1
         )
         x_type_mask = torch.cat([actor_feat.new_ones(*actor_feat.shape[:2]),
                                  lane_feat.new_zeros(*lane_feat.shape[:2])], dim=1).bool()
-        # if x_encoder.isnan().any() :
-        #     print("x_encoder is NaN!")
-        x_encoder = x_encoder + pos_embed
 
-        # if x_encoder.isnan().any() :
-        #     print("x_encoder is NaN!")
+        x_encoder = x_encoder + pos_embed
         if isinstance(self, MoeMotion):
             # read memory for stream process
             if 'memory_dict' in data and data['memory_dict'] is not None:
@@ -189,11 +183,12 @@ class MoeMotion_I(nn.Module):
         for blk in self.blocks:
             x_encoder = blk(x_encoder, key_padding_mask=~key_valid_mask)
         x_encoder = self.norm(x_encoder)
-        # if x_encoder.isnan().any() :
-        #     print("x_encoder is NaN!")
 
-        y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask)
-        
+        if self.moe:
+            y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask)
+        else:
+            x_agent = x_encoder[:, 0]
+            y_hat = self.decoder(x_agent)
         x_others = x_encoder[:, 1:N]
         y_hat_others = self.dense_predictor(x_others).view(B, x_others.size(1), -1, 2)
         
