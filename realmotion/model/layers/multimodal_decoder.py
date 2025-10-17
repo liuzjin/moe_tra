@@ -203,6 +203,7 @@ class QueryBasedMoeDecoder(nn.Module):
                  attn_drop = 0.2,
                  drop_path= 0.2,
                  query_cross_layers=1,
+                 query_self_atten=True,
                  query_self_layers=1,
                  act_layer=nn.GELU,
                  norm_layer=nn.LayerNorm,
@@ -234,13 +235,15 @@ class QueryBasedMoeDecoder(nn.Module):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
-        self.query_self_blocks = nn.ModuleList( Block(
-                dim=dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=drop_path,
-            ) for i in range(query_self_layers))
+        self.query_self_atten = query_self_atten
+        if query_self_atten:
+            self.query_self_blocks = nn.ModuleList( Block(
+                    dim=dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop_path=drop_path,
+                ) for i in range(query_self_layers))
         
             
         # --- 3. Logit生成器 ---
@@ -278,8 +281,9 @@ class QueryBasedMoeDecoder(nn.Module):
                 src_kv=context, 
                 key_padding_mask=key_padding_mask,
             )
-        for blk in self.query_self_blocks:
-            expert_features = blk(src=expert_features)
+        if self.query_self_atten:
+            for blk in self.query_self_blocks:
+                expert_features = blk(src=expert_features)
 
         # --- 核心步骤 2: 从专业化特征计算门控得分(logits) ---
         

@@ -20,6 +20,7 @@ pl_module:
     drop_path: 0.2
     moe: False
     use_transformer_decoder: False
+    query_self_atten: True
   optim:
     lr: 1e-3
     weight_decay: 1e-2

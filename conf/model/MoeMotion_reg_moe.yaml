@@ -21,6 +21,7 @@ pl_module:
     moe: True
     use_transformer_decoder: True
     query_cross_layers: 2
+    query_self_atten: True
     query_self_layers: 1
     num_experts: 9
     top_k: ${top_k}
