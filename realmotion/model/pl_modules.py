@@ -843,64 +843,108 @@ class RegressionLightningModule(BaseLightningModule):
         return final_state_padded
     
 class Reg_moe_LightningModule(RegressionLightningModule):
-    def __init__(self,
+    def __init__(self,intent_label,
                  **kwargs):
         super().__init__(**kwargs)
-
-        self.metrics = MetricCollection(
-            {
-                'minADE1': minADE(k=1),
-                'minADE6': minADE(k=6),
-                'minFDE1': minFDE(k=1),
-                'minFDE6': minFDE(k=6),
-                'MR': MR(),
-                'b-minFDE6': brier_minFDE(k=6),
-                'IntentAcc': CustomAccuracy()
-            }
-        )
+        self.intent_label = intent_label
+        if self.intent_label:
+            self.metrics = MetricCollection(
+                {
+                    'minADE1': minADE(k=1),
+                    'minADE6': minADE(k=6),
+                    'minFDE1': minFDE(k=1),
+                    'minFDE6': minFDE(k=6),
+                    'MR': MR(),
+                    'b-minFDE6': brier_minFDE(k=6),
+                    'IntentAcc': CustomAccuracy()
+                }
+            )
     
     def cal_loss(self, out, data, tag):
-        gt_segment, y_others = data['target'][:, 0], data['target'][:, 1:]
+        gt_segment = data['target'][:, 0]
+        y_others = data['target'][:, 1:]
         others_reg_mask = data['target_mask'][:, 1:]
         
-        gt_action = data['intent'][:,0,0]
-        predictions = out['y_hat']['predictions']
-        y_hat_others = out['y_hat_others']
-        probs = out['y_hat']['probs']
+        # 处理对其他智能体的预测 (这部分逻辑在两种模式下是共用的)
+        y_hat_others = out.get('y_hat_others') # 使用.get避免在模式2中出错
+        others_reg_loss = torch.tensor(0.0, device=gt_segment.device)
+        if y_hat_others is not None and y_others.numel() > 0:
+            if others_reg_mask.sum() > 0:
+                others_reg_loss = F.smooth_l1_loss(
+                    y_hat_others[others_reg_mask], y_others[others_reg_mask]
+                )
 
-        
-        # 1. 门控损失 (分类)
-        gating_loss = F.cross_entropy(probs, gt_action)
-        if gating_loss.isinf():
-            print("gating_loss is Inf!")
-        
-        # 2. 回归损失 ("最佳匹配者负责制")
-        gt_expanded = gt_segment.unsqueeze(1) # -> (B, 1, T, 2)
-        l2_norm = torch.norm(predictions[..., :2] - gt_expanded, dim=-1).sum(dim=-1)
-        
-        _, best_mode_indices = torch.min(l2_norm, dim=-1) # (B,)
+        # --- 2. 检查使用哪种损失模式 ---
+        # 核心判断：如果 'intent' key 存在于 data 中，则使用旧的硬标签模式
+        if self.intent_label:
+            # ================================================================
+            # 模式 1: 硬标签分类 + 赢家通吃回归 (您的原始逻辑)
+            # ================================================================
+            # 假设模型输出是您之前的格式 out['y_hat']
+            predictions = out['y_hat']['predictions']
+            # cross_entropy 需要 logits, 确保 'probs' 字段是 logits
+            logits = out['y_hat']['probs'] 
+            gt_action = data['intent'][:, 0, 0]
 
-        best_predictions = torch.gather(
-            predictions, 1, 
-            best_mode_indices.view(-1, 1, 1, 1).expand(-1, 1, predictions.size(2), 2)
-        ).squeeze(1)
-        
-        regression_loss = F.smooth_l1_loss(best_predictions, gt_segment)
-        others_reg_loss = F.smooth_l1_loss(
-            y_hat_others[others_reg_mask], y_others[others_reg_mask]
-        )
+            # a) 门控损失 (分类)
+            gating_loss = F.cross_entropy(logits, gt_action)
+            
+            # b) 回归损失 ("赢家通吃")
+            #    找到离真值最近的预测模态
+            gt_expanded = gt_segment.unsqueeze(1)
+            l2_dist_per_mode = torch.norm(predictions[..., :2] - gt_expanded, p=2, dim=-1).sum(dim=-1)
+            _, best_mode_indices = torch.min(l2_dist_per_mode, dim=-1)
 
+            #    只用最好的那个模态来计算损失
+            best_predictions = torch.gather(
+                predictions, 1, 
+                best_mode_indices.view(-1, 1, 1, 1).expand(-1, 1, predictions.size(2), predictions.size(3))
+            ).squeeze(1)
+            
+            regression_loss = F.smooth_l1_loss(best_predictions, gt_segment)
+            
+            # c) 辅助损失初始化为0，因为此模式下没有
+            aux_loss = torch.tensor(0.0, device=gt_segment.device)
 
-        # 3. 总损失
-        total_loss = regression_loss +  gating_loss  + others_reg_loss
-        
+            # d) 总损失
+            total_loss = regression_loss + gating_loss + others_reg_loss
 
+        else:
+            # ================================================================
+            # 模式 2: 软加权回归 + 负载均衡 (新的推荐逻辑)
+            # ================================================================
+            # 假设模型输出是新的格式
+            predictions = out['predictions']
+            logits = out['logits']
+            aux_loss = out['aux_loss']
+            
+            # a) 门控损失初始化为0，因为此模式下没有
+            gating_loss = torch.tensor(0.0, device=gt_segment.device)
+
+            # b) 软加权回归损失
+            probs = F.softmax(logits, dim=-1)
+            
+            gt_expanded = gt_segment.unsqueeze(1).expand_as(predictions)
+            
+            # 计算每个专家预测的误差 (B, num_experts)
+            error_per_expert = F.smooth_l1_loss(predictions, gt_expanded, reduction='none').mean(dim=[2, 3])
+            
+            # 使用门控概率对误差进行加权
+            weighted_regression_error = torch.sum(probs * error_per_expert, dim=-1)
+            regression_loss = weighted_regression_error.mean()
+            
+            # c) 总损失
+            total_loss = regression_loss + (0.01 * aux_loss) + others_reg_loss
+
+        # --- 3. 构建统一的日志字典 ---
         loss_dict = {
-            f'{tag}loss': total_loss.item(),
-            f'{tag}gating_loss': gating_loss.item(),
-            f'{tag}regression_loss': regression_loss.item(),
-            f'{tag}others_reg_loss': others_reg_loss.item(),
+            f'{tag}/total_loss': total_loss.item(),
+            f'{tag}/regression_loss': regression_loss.item(),
+            f'{tag}/gating_loss': gating_loss.item(),
+            f'{tag}/aux_loss': aux_loss.item(),
+            f'{tag}/others_reg_loss': others_reg_loss.item(),
         }
+        
         return total_loss, loss_dict
     
     
@@ -926,12 +970,14 @@ class Reg_moe_LightningModule(RegressionLightningModule):
                 
                 out = self(last_input, False)
                 step_log_probs = torch.log(out['y_hat']['top_k_probs'])
-                experts = out['y_hat']['top_k_indices']
+                if self.intent_label:
+                    experts = out['y_hat']['top_k_indices']
                 
                 for j in range(self.k):
 
                     new_log_probs = log_probs + step_log_probs[:, j]
-                    expert_idx = experts[:, [j]]  # (B,)
+                    if self.intent_label:
+                        expert_idx = experts[:, [j]]  # (B,)
                     pred_av = out['y_hat']['predictions'][:, [j], ...] # (B, 10, 2)
                     pred = torch.cat([pred_av, out['y_hat_others']], dim=1)
                     
@@ -939,13 +985,16 @@ class Reg_moe_LightningModule(RegressionLightningModule):
 
                     if trajectories is None:
                         trajectories_pred = pred
-                        expert_pred = expert_idx
+                        if self.intent_label:
+                            expert_pred = expert_idx
                     else:
                         trajectories_pred = torch.cat([trajectories, pred], dim=2)
-                        expert_pred = torch.cat([expert, expert_idx], dim=1)
-                    
-                    all_new_beams.append((new_log_probs, trajectories_pred, next_input,  expert_pred))
-            
+                        if self.intent_label:
+                            expert_pred = torch.cat([expert, expert_idx], dim=1)
+                    if self.intent_label:
+                        all_new_beams.append((new_log_probs, trajectories_pred, next_input,  expert_pred))
+                    else:
+                        all_new_beams.append((new_log_probs, trajectories_pred, next_input, None))
             # --- 筛选 Top-K Beams ---
             # 根据累积概率排序
             sorted_beams = sorted(all_new_beams, key=lambda x: x[0].sum(), reverse=True)
@@ -953,15 +1002,23 @@ class Reg_moe_LightningModule(RegressionLightningModule):
         
         # --- 循环结束，评估结果 ---
         # 选择最终概率最高的轨迹
-        final_predictions = {'y_hat': [x[1][:, 0] for x in beams], 
-                             'pi': [torch.exp(x[0]) for x in beams],
-                             "intent": [x[3] for x in beams]}
-    
-        final_predictions['y_hat'] = torch.stack(final_predictions['y_hat'], dim=1) # (B, beam_size, 60, 2)
-        final_predictions['pi'] = torch.stack(final_predictions['pi'], dim=1)
-        final_predictions['pi'] = torch.softmax(final_predictions['pi'], dim=-1)
-        final_predictions['intent'] = torch.stack(final_predictions['intent'], dim=1)
-        final_predictions['intent_target'] = data[0]['intent'][:,0]
+        if self.intent_label:
+            final_predictions = {'y_hat': [x[1][:, 0] for x in beams], 
+                                'pi': [torch.exp(x[0]) for x in beams],
+                                "intent": [x[3] for x in beams]}
+        
+            final_predictions['y_hat'] = torch.stack(final_predictions['y_hat'], dim=1) # (B, beam_size, 60, 2)
+            final_predictions['pi'] = torch.stack(final_predictions['pi'], dim=1)
+            final_predictions['pi'] = torch.softmax(final_predictions['pi'], dim=-1)
+            final_predictions['intent'] = torch.stack(final_predictions['intent'], dim=1)
+            final_predictions['intent_target'] = data[0]['intent'][:,0]
+        else:
+            final_predictions = {'y_hat': [x[1][:, 0] for x in beams], 
+                                'pi': [torch.exp(x[0]) for x in beams]}
+        
+            final_predictions['y_hat'] = torch.stack(final_predictions['y_hat'], dim=1) # (B, beam_size, 60, 2)
+            final_predictions['pi'] = torch.stack(final_predictions['pi'], dim=1)
+            final_predictions['pi'] = torch.softmax(final_predictions['pi'], dim=-1)
         # 计算评估指标
 
         metrics = self.metrics(final_predictions, gt_full_future_traj[:, 0])

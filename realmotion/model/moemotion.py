@@ -28,6 +28,7 @@ class MoeMotion_I(nn.Module):
         query_self_layers=1,
         num_experts=9,
         top_k=2,
+        intent_label=True
     ) -> None:
         super().__init__()
         self.use_transformer_decoder = use_transformer_decoder
@@ -69,7 +70,8 @@ class MoeMotion_I(nn.Module):
                     query_self_layers=query_self_layers,
                     future_steps=future_steps, 
                     num_experts=num_experts, 
-                    top_k=top_k)
+                    top_k=top_k,
+                    intent_label=intent_label)
             else:
                 self.decoder = MoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k)
         else:

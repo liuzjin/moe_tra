@@ -9,11 +9,12 @@ pl_module:
   logits_max: False
   history_frames: 50
   schedule_type: 'linear'
+  intent_label: ${intent_label}
   model:
     _target_: realmotion.model.moemotion.MoeMotion_I
     embed_dim: 128
     future_steps: ${n_step}
-    encoder_depth: 4
+    encoder_depth: 2
     num_heads: 8
     mlp_ratio: 4.0
     qkv_bias: False
@@ -25,6 +26,7 @@ pl_module:
     query_self_layers: 1
     num_experts: 9
     top_k: ${top_k}
+    intent_label: ${intent_label}
   optim:
     lr: 1e-3
     weight_decay: 1e-2

@@ -210,12 +210,14 @@ class QueryBasedMoeDecoder(nn.Module):
                  future_steps=10, 
                  num_experts=9, 
                  top_k=2,
-                 num_heads=8): # 增加了注意力头的数量作为参数
+                 num_heads=8,
+                 intent_label=True): # 增加了注意力头的数量作为参数
         super().__init__()
         self.embed_dim = dim
         self.future_steps = future_steps
         self.num_experts = num_experts
         self.top_k = top_k
+        self.intent_label = intent_label
 
         # --- 1. 可学习的意图查询向量 ---
         # 这是新架构的核心。每个向量将学会代表一种特定的驾驶意图。
@@ -248,8 +250,10 @@ class QueryBasedMoeDecoder(nn.Module):
             
         # --- 3. Logit生成器 ---
         # 从交叉注意力的输出（即每个专家的专业化特征）中，计算出该专家的得分。
-        self.logit_head = nn.Linear(self.embed_dim, 1)
-
+        if intent_label:
+            self.logit_head = nn.Linear(self.embed_dim, 1)
+        else:
+            self.logit_head = nn.Linear(self.embed_dim, self.num_experts)
         # --- 4. 专家网络列表 (与之前相同) ---
         self.experts = nn.ModuleList([
             MLPExpert(self.embed_dim, self.future_steps)
@@ -286,29 +290,44 @@ class QueryBasedMoeDecoder(nn.Module):
                 expert_features = blk(src=expert_features)
 
         # --- 核心步骤 2: 从专业化特征计算门控得分(logits) ---
-        
+        if self.intent_label:
         # (B, num_experts, D) -> (B, num_experts, 1) -> (B, num_experts)
-        logits = self.logit_head(expert_features).squeeze(-1)
-        probs = logits.softmax(dim=-1)
-
+            logits = self.logit_head(expert_features).squeeze(-1)
+            probs = logits.softmax(dim=-1)
+        else:
+            logits = self.logit_head(expert_features.mean(dim=0)).squeeze(-1)
+            probs = logits.softmax(dim=-1)
+            aux_loss = torch.tensor(0.0, device=context.device)
         # --- 核心步骤 3: 使用专业化特征进行轨迹预测 ---
+        predictions = []
+        for i in range(self.num_experts):
+            # 提取第i个专家的特征 (B, D)
+            current_expert_feature = expert_features[:, i, :]
+            pred = self.experts[i](current_expert_feature)
+            predictions.append(pred)
+        
+        # (B, num_experts, future_steps, 2)
+        all_predictions = torch.stack(predictions, dim=1)
 
         if training:
+            if not self.intent_label:
+                mean_probs = torch.mean(F.softmax(logits, dim=-1), dim=0)
+                # 计算每个专家被分配到的任务比例
+                # 这里我们使用 logits 的 softmax 作为 "soft" 分配
+                fraction_of_examples = torch.mean(F.softmax(logits, dim=-1), dim=0)
+                
+                # 负载均衡损失 = sum(每个专家被选中的概率 * 每个专家被分配的任务比例)
+                # 这个损失会惩罚门控网络总是选择少数几个专家的情况
+                aux_loss = self.num_experts * torch.sum(mean_probs * fraction_of_examples)
             # 训练时，我们需要计算所有专家的输出以进行 "Winner-Takes-All" 损失计算
-            predictions = []
-            for i in range(self.num_experts):
-                # 提取第i个专家的特征 (B, D)
-                current_expert_feature = expert_features[:, i, :]
-                pred = self.experts[i](current_expert_feature)
-                predictions.append(pred)
-            
-            # (B, num_experts, future_steps, 2)
-            all_predictions = torch.stack(predictions, dim=1)
 
-            return {
+            output = {
                 "predictions": all_predictions,  # (B, num_experts, T, 2)
                 "probs": probs                  # (B, num_experts)
             }
+            if not self.intent_label:
+                output["aux_loss"] = aux_loss
+            return output
         else:
             # 推理时，只计算 Top-K 专家以提高效率
             top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
@@ -316,20 +335,21 @@ class QueryBasedMoeDecoder(nn.Module):
             # 为了高效地只计算 top-k 专家的轨迹，我们首先需要收集对应的特征
             # 使用 gather 从 expert_features 中精确地挑选出 top-k 特征
             # top_k_indices (B, K) -> (B, K, D) for gathering
-            indices_for_gather = top_k_indices.unsqueeze(-1).expand(-1, -1, self.embed_dim)
-            top_k_features = torch.gather(expert_features, 1, indices_for_gather)
+            # indices_for_gather = top_k_indices.unsqueeze(-1).expand(-1, -1, self.embed_dim)
+            # top_k_features = torch.gather(expert_features, 1, indices_for_gather)
 
             # 现在我们有了一个紧凑的张量 (B, K, D) 只包含需要计算的特征
-            top_k_predictions = torch.zeros(batch_size, self.top_k, self.future_steps, 2, device=context.device)
+            # top_k_predictions = torch.zeros(batch_size, self.top_k, self.future_steps, 2, device=context.device)
 
             # 循环遍历，将每个特征路由到正确的专家
             # 这里的循环比之前的版本更高效，因为特征提取已经全部在GPU上并行完成
-            for i in range(batch_size):
-                for j in range(self.top_k):
-                    expert_idx = top_k_indices[i, j].item()
-                    feature = top_k_features[i, j]
-                    top_k_predictions[i, j] = self.experts[expert_idx](feature)
-            
+            # for i in range(batch_size):
+            #     for j in range(self.top_k):
+            #         expert_idx = top_k_indices[i, j].item()
+            #         feature = top_k_features[i, j]
+            #         top_k_predictions[i, j] = self.experts[expert_idx](feature)
+            indices_for_gather = top_k_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, self.future_steps, 2)
+            top_k_predictions = torch.gather(all_predictions, 1, indices_for_gather)
             return {
                 "predictions": top_k_predictions, # (B, top_k, T, 2) -> Top-K的轨迹
                 "probs": probs,              # (B, num_experts) -> 【新增】返回完整的概率分布，方便分析
