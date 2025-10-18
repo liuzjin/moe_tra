@@ -914,15 +914,13 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             # 模式 2: 软加权回归 + 负载均衡 (新的推荐逻辑)
             # ================================================================
             # 假设模型输出是新的格式
-            predictions = out['predictions']
-            logits = out['logits']
-            aux_loss = out['aux_loss']
+            predictions = out['y_hat']['predictions']
+            probs = out['y_hat']['probs']
+            aux_loss = out['y_hat']['aux_loss']
             
             # a) 门控损失初始化为0，因为此模式下没有
             gating_loss = torch.tensor(0.0, device=gt_segment.device)
 
-            # b) 软加权回归损失
-            probs = F.softmax(logits, dim=-1)
             
             gt_expanded = gt_segment.unsqueeze(1).expand_as(predictions)
             

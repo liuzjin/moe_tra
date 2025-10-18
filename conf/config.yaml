@@ -30,7 +30,7 @@ checkpoint:
 submit:
 n_step: 60
 top_k: 6
-intent_label: True
+intent_label: False
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints

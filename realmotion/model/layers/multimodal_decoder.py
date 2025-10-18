@@ -250,10 +250,8 @@ class QueryBasedMoeDecoder(nn.Module):
             
         # --- 3. Logit生成器 ---
         # 从交叉注意力的输出（即每个专家的专业化特征）中，计算出该专家的得分。
-        if intent_label:
-            self.logit_head = nn.Linear(self.embed_dim, 1)
-        else:
-            self.logit_head = nn.Linear(self.embed_dim, self.num_experts)
+        
+        self.logit_head = nn.Linear(self.embed_dim, 1)
         # --- 4. 专家网络列表 (与之前相同) ---
         self.experts = nn.ModuleList([
             MLPExpert(self.embed_dim, self.future_steps)
@@ -295,7 +293,7 @@ class QueryBasedMoeDecoder(nn.Module):
             logits = self.logit_head(expert_features).squeeze(-1)
             probs = logits.softmax(dim=-1)
         else:
-            logits = self.logit_head(expert_features.mean(dim=0)).squeeze(-1)
+            logits = self.logit_head(expert_features).squeeze(-1)
             probs = logits.softmax(dim=-1)
             aux_loss = torch.tensor(0.0, device=context.device)
         # --- 核心步骤 3: 使用专业化特征进行轨迹预测 ---
@@ -352,7 +350,7 @@ class QueryBasedMoeDecoder(nn.Module):
             top_k_predictions = torch.gather(all_predictions, 1, indices_for_gather)
             return {
                 "predictions": top_k_predictions, # (B, top_k, T, 2) -> Top-K的轨迹
-                "probs": probs,              # (B, num_experts) -> 【新增】返回完整的概率分布，方便分析
+                "probs": top_k_probs,              # (B, num_experts) -> 【新增】返回完整的概率分布，方便分析
                 "top_k_probs": top_k_probs,       # (B, top_k) -> Top-K的概率值
                 "top_k_indices": top_k_indices    # (B, top_k) -> Top-K的专家索引
             }
