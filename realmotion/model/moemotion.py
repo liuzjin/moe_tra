@@ -178,12 +178,16 @@ class MoeMotion_I(nn.Module):
             # scene interaction
             new_x_encoder = x_encoder
             C = x_encoder.size(-1)
-            # new_x_encoder = self.scene_interact(new_x_encoder, memory_x_encoder, cur_pose, memory_pose, key_padding_mask=~memory_valid_mask)
+            # # new_x_encoder = self.scene_interact(new_x_encoder, memory_x_encoder, cur_pose, memory_pose, key_padding_mask=~memory_valid_mask)
+            # new_actor_feat = self.scene_interact(new_x_encoder[x_type_mask].reshape(B, -1, C), memory_x_encoder, cur_pose, memory_pose, key_padding_mask=~memory_valid_mask)
+            # new_lane_feat = self.scene_interact(new_x_encoder[~x_type_mask].reshape(B, -1, C), memory_x_encoder[~memory_type_mask].reshape(B, -1, C), cur_pose, memory_pose, key_padding_mask=~memory_valid_mask[~memory_type_mask].reshape(B, -1))
+            # new_x_encoder = torch.cat([new_actor_feat, new_lane_feat], dim=1)
+            # x_encoder = new_x_encoder * key_valid_mask.unsqueeze(-1) + x_encoder * ~key_valid_mask.unsqueeze(-1)
+
             new_actor_feat = self.scene_interact(new_x_encoder[x_type_mask].reshape(B, -1, C), memory_x_encoder, cur_pose, memory_pose, key_padding_mask=~memory_valid_mask)
-            new_lane_feat = self.scene_interact(new_x_encoder[~x_type_mask].reshape(B, -1, C), memory_x_encoder[~memory_type_mask].reshape(B, -1, C), cur_pose, memory_pose, key_padding_mask=~memory_valid_mask[~memory_type_mask].reshape(B, -1))
-            new_x_encoder = torch.cat([new_actor_feat, new_lane_feat], dim=1)
+            lane_feat = new_x_encoder[~x_type_mask].reshape(B, -1, C)
+            new_x_encoder = torch.cat([new_actor_feat, lane_feat], dim=1)
             x_encoder = new_x_encoder * key_valid_mask.unsqueeze(-1) + x_encoder * ~key_valid_mask.unsqueeze(-1)
-        
         for blk in self.blocks:
             x_encoder = blk(x_encoder, key_padding_mask=~key_valid_mask)
         x_encoder = self.norm(x_encoder)
@@ -196,47 +200,45 @@ class MoeMotion_I(nn.Module):
         x_others = x_encoder[:, 1:N]
         y_hat_others = self.dense_predictor(x_others).view(B, x_others.size(1), -1, 2)
         
-        # cos, sin = data['theta'].cos(), data['theta'].sin()
-        # rot_mat = data['theta'].new_zeros(B, 2, 2)
-        # rot_mat[:, 0, 0] = cos
-        # rot_mat[:, 0, 1] = -sin
-        # rot_mat[:, 1, 0] = sin
-        # rot_mat[:, 1, 1] = cos
+        cos, sin = data['theta'].cos(), data['theta'].sin()
+        rot_mat = data['theta'].new_zeros(B, 2, 2)
+        rot_mat[:, 0, 0] = cos
+        rot_mat[:, 0, 1] = -sin
+        rot_mat[:, 1, 0] = sin
+        rot_mat[:, 1, 1] = cos
 
 
-        # if isinstance(self, MoeMotion):
-        #     # traj interaction
-        #     if 'memory_dict' in data and data['memory_dict'] is not None:
-        #         memory_y_hat = data['memory_dict']['glo_y_hat']
-        #         ori_idx = ((data['timestamp'] - data['memory_dict']['timestamp']) / 0.1).long() - 1
-        #         memory_traj_ori = torch.gather(memory_y_hat, 2, ori_idx.reshape(
-        #             B, 1, -1, 1).repeat(1, memory_y_hat.size(1), 1, memory_y_hat.size(-1)))
-        #         memory_y_hat = torch.bmm((memory_y_hat - memory_traj_ori).reshape(B, -1, 2), rot_mat
-        #                                 ).reshape(B, memory_y_hat.size(1), -1, 2)
-        #         traj_embed = self.traj_embed(y_hat.detach().reshape(B, y_hat.size(1), -1))
-        #         memory_traj_embed = self.traj_embed(memory_y_hat.reshape(B, memory_y_hat.size(1), -1))
-        #         x_mode = self.traj_interact(x_mode, memory_x_mode, cur_pose, memory_pose,
-        #                                             cur_pos_embed=traj_embed,
-        #                                             memory_pos_embed=memory_traj_embed)
-        #         y_hat_diff = self.stream_loc(x_mode).reshape(B, y_hat.size(1), -1, 2)
-        #         y_hat = y_hat + y_hat_diff
+        if isinstance(self, MoeMotion):
+            # traj interaction
+            if 'memory_dict' in data and data['memory_dict'] is not None:
+                memory_y_hat = data['memory_dict']['glo_y_hat']
+                memory_x_mode = data['memory_dict']['x_mode']
+                ori_idx = ((data['timestamp'] - data['memory_dict']['timestamp']) / 0.1).long() - 1
+                memory_traj_ori = torch.gather(memory_y_hat, 2, ori_idx.reshape(
+                    B, 1, -1, 1).repeat(1, memory_y_hat.size(1), 1, memory_y_hat.size(-1)))
+                memory_y_hat = torch.bmm((memory_y_hat - memory_traj_ori).reshape(B, -1, 2), rot_mat
+                                        ).reshape(B, memory_y_hat.size(1), -1, 2)
+                traj_embed = self.traj_embed(y_hat.detach().reshape(B, y_hat.size(1), -1))
+                memory_traj_embed = self.traj_embed(memory_y_hat.reshape(B, memory_y_hat.size(1), -1))
+                x_mode = self.traj_interact(x_mode, memory_x_mode, cur_pose, memory_pose,
+                                                    cur_pos_embed=traj_embed,
+                                                    memory_pos_embed=memory_traj_embed)
+                y_hat_diff = self.stream_loc(x_mode).reshape(B, y_hat.size(1), -1, 2)
+                y_hat = y_hat + y_hat_diff
 
         ret_dict = {
             'y_hat': y_hat,
             'y_hat_others': y_hat_others,
         }
 
-        # glo_y_hat = torch.bmm(y_hat['predictions'].detach().reshape(B, -1, 2), torch.inverse(rot_mat))
-        # glo_y_hat = glo_y_hat.reshape(B, y_hat['predictions'].size(1), -1, 2)
-        # glo_y_hat_others = torch.bmm(y_hat_others.detach().reshape(B, -1, 2), torch.inverse(rot_mat))
-        # glo_y_hat_others = glo_y_hat_others.reshape(B, y_hat_others.size(1), -1, 2)
+        glo_y_hat = torch.bmm(y_hat['predictions'].detach().reshape(B, -1, 2), torch.inverse(rot_mat))
+        glo_y_hat = glo_y_hat.reshape(B, y_hat['predictions'].size(1), -1, 2)
 
         if isinstance(self, MoeMotion):
             memory_dict = {
                 'x_encoder': x_encoder,
-                'x_mode': glo_y_hat,
+                'x_mode': y_hat['mode'],
                 'glo_y_hat': glo_y_hat,
-                'glo_y_hat_others': glo_y_hat_others,
                 'x_mask': key_valid_mask,
                 'x_type_mask': x_type_mask,
                 'origin': data['origin'],

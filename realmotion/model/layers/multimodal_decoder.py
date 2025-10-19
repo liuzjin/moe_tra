@@ -123,7 +123,8 @@ class MoeDecoder(nn.Module):
         # --- 核心改动 3: 根据 intent_label 准备输出字典 ---
         output = {
             "predictions": all_predictions,
-            "logits": logits  # 返回原始logits, 兼容两种损失函数
+            "logits": logits,  # 返回原始logits, 兼容两种损失函数
+            "mode": expert_features
         }
         
         # 如果是无标签模式 (intent_label=False), 则计算并添加 aux_loss
@@ -162,7 +163,8 @@ class MoeDecoder(nn.Module):
         return {
             "predictions": top_k_predictions,
             "probs": top_k_probs,
-            "top_k_indices": top_k_indices
+            "top_k_indices": top_k_indices,
+            "mode": expert_features
         }
 
     def forward(self, encoder_out: torch.Tensor, training: bool, key_padding_mask=None) -> Dict:
@@ -292,7 +294,8 @@ class QueryBasedMoeDecoder(nn.Module):
 
             output = {
                 "predictions": all_predictions,  # (B, num_experts, T, 2)
-                "logits": logits                  # (B, num_experts)
+                "logits": logits,                  # (B, num_experts)
+                "mode":expert_features
             }
             if not self.intent_label:
                 output["aux_loss"] = aux_loss
@@ -307,5 +310,6 @@ class QueryBasedMoeDecoder(nn.Module):
                 "predictions": top_k_predictions, # (B, top_k, T, 2) -> Top-K的轨迹
                 "probs": top_k_probs,              # (B, num_experts) -> 【新增】返回完整的概率分布，方便分析
                 "top_k_probs": top_k_probs,       # (B, top_k) -> Top-K的概率值
-                "top_k_indices": top_k_indices    # (B, top_k) -> Top-K的专家索引
+                "top_k_indices": top_k_indices,    # (B, top_k) -> Top-K的专家索引
+                "mode":expert_features
             }
