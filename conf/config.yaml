@@ -23,10 +23,10 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 1
+gpus: 8
 batch_size: 48
 epochs: 80
-checkpoint:  
+checkpoint:  outputs/MoeMotion_reg_moe-av2_3frame_30his/20251018-231053/checkpoints/epoch_5-minADE6_2.9898433685302734.ckpt
 submit:
 n_step: 60
 top_k: 6
@@ -62,7 +62,7 @@ trainer:
   sync_batchnorm: true
   default_root_dir: ${output_dir}
   fast_dev_run: 0
-  num_sanity_val_steps: 1
+  num_sanity_val_steps: 0
   detect_anomaly: False
 
 
