@@ -837,9 +837,9 @@ class RegressionLightningModule(BaseLightningModule):
         if 'x_valid_mask' in final_state_padded:
             final_state_padded['x_key_valid_mask'] = final_state_padded['x_valid_mask'].any(-1)
         # 在 return final_state_padded 前添加以下代码块
-        for key, value in final_state_padded.items():
-            if isinstance(value, torch.Tensor):
-                final_state_padded[key] = value.detach()
+        # for key, value in final_state_padded.items():
+        #     if isinstance(value, torch.Tensor):
+        #         final_state_padded[key] = value.detach()
         return final_state_padded
     
 class Reg_moe_LightningModule(RegressionLightningModule):
