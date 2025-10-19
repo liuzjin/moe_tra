@@ -1,12 +1,12 @@
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_reg
-
 defaults:
   - _self_
   - datamodule: av2_moe
-  - model: MoeMotion_reg_moe
+  - model: MoeMotion_reg
+
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_reg_moe
 
 # defaults:
 #   - _self_
@@ -29,7 +29,7 @@ batch_size: 48
 epochs: 80
 checkpoint:  
 submit:
-n_step: 60
+n_step: 30
 top_k: 6
 intent_label: False
 callbacks:

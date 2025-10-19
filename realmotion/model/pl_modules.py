@@ -534,7 +534,7 @@ class RegressionLightningModule(BaseLightningModule):
             beams = sorted_beams[:beam_size]
             step_pre = {}
             step_pre['predictions'] = torch.stack([pre[:, 0, -self.n_step:] for _, pre, _ in beams ], dim=1)
-            step_pre['probs'] = torch.stack([pi for pi , _, _ in beams ], dim=1)
+            step_pre['logits'] = torch.stack([pi for pi , _, _ in beams ], dim=1)
             step_out['y_hat'] = step_pre
             step_out['y_hat_others'] = beams[0][1][:, 1:, -self.n_step:]
             step_target = last_input.copy()
