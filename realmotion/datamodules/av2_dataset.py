@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
-from av2.map.map_api import ArgoverseStaticMap
 from collections import Counter
 class Av2Dataset(Dataset):
     def __init__(
