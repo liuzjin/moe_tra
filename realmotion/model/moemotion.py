@@ -73,7 +73,7 @@ class MoeMotion_I(nn.Module):
                     top_k=top_k,
                     intent_label=intent_label)
             else:
-                self.decoder = MoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k)
+                self.decoder = MoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label)
         else:
             self.decoder = MultimodalDecoder(embed_dim, future_steps)
         self.dense_predictor = nn.Sequential(

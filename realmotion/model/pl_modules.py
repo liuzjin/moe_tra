@@ -410,7 +410,7 @@ class RegressionLightningModule(BaseLightningModule):
         
         predictions = out['y_hat']['predictions']
         y_hat_others = out['y_hat_others']
-        pi = out['y_hat']['probs']
+        pi = out['y_hat']['logits']
 
         l2_norm = torch.norm(predictions[..., :2] - gt_segment.unsqueeze(1), dim=-1).sum(dim=-1)
 
@@ -883,7 +883,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             # 假设模型输出是您之前的格式 out['y_hat']
             predictions = out['y_hat']['predictions']
             # cross_entropy 需要 logits, 确保 'probs' 字段是 logits
-            logits = out['y_hat']['probs'] 
+            logits = out['y_hat']['logits'] 
             gt_action = data['intent'][:, 0, 0]
 
             # a) 门控损失 (分类)
@@ -915,7 +915,8 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             # ================================================================
             # 假设模型输出是新的格式
             predictions = out['y_hat']['predictions']
-            probs = out['y_hat']['probs']
+            logits = out['y_hat']['logits']
+            probs = F.softmax(logits, dim=-1)
             aux_loss = out['y_hat']['aux_loss']
             
             # a) 门控损失初始化为0，因为此模式下没有
@@ -967,7 +968,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
                 # a. 准备输入并预测
                 
                 out = self(last_input, False)
-                step_log_probs = torch.log(out['y_hat']['top_k_probs'])
+                step_log_probs = torch.log(out['y_hat']['probs'])
                 if self.intent_label:
                     experts = out['y_hat']['top_k_indices']
                 

@@ -1,11 +1,12 @@
-defaults:
-  - _self_
-  - datamodule: av2_moe
-  - model: MoeMotion_reg
 # defaults:
 #   - _self_
 #   - datamodule: av2_moe
-#   - model: MoeMotion_reg_moe
+#   - model: MoeMotion_reg
+
+defaults:
+  - _self_
+  - datamodule: av2_moe
+  - model: MoeMotion_reg_moe
 
 # defaults:
 #   - _self_
@@ -62,7 +63,7 @@ trainer:
   sync_batchnorm: true
   default_root_dir: ${output_dir}
   fast_dev_run: 0
-  num_sanity_val_steps: 0
+  num_sanity_val_steps: 1
   detect_anomaly: False
 
 
