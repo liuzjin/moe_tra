@@ -101,10 +101,9 @@ class MoeDecoder(nn.Module):
             for _ in range(self.num_experts)
         ])
 
-    def forward_train(self, x: torch.Tensor) -> Dict: # <<< 核心改动 2: 返回字典
-        """
-        训练模式下的前向传播：计算所有专家。
-        """
+    def forward(self, encoder_out: torch.Tensor, training: bool, key_padding_mask=None) -> Dict:
+        # 假设输入来自编码器，我们只取第一个[CLS] token的特征
+        x = encoder_out[:, 0].unsqueeze(1) # 保持 (B, 1, D) 的形状
         x_squeezed = x.squeeze(1)
         
         expert_features = self.multimodal_feature_generator(x_squeezed).view(-1, self.num_experts, self.embed_dim)
@@ -112,71 +111,52 @@ class MoeDecoder(nn.Module):
         # --- 计算门控logits (保持不变) ---
         logits = self.gating_network(x_squeezed) # (B, num_experts)
         
-        # --- 并行计算所有专家的轨迹 (保持不变) ---
-        predictions = []
-        for i in range(self.num_experts):
-            current_expert_feature = expert_features[:, i, :]
-            pred = self.experts[i](current_expert_feature)
-            predictions.append(pred)
-        all_predictions = torch.stack(predictions, dim=1)
-        
-        # --- 核心改动 3: 根据 intent_label 准备输出字典 ---
-        output = {
-            "predictions": all_predictions,
-            "logits": logits,  # 返回原始logits, 兼容两种损失函数
-            "mode": expert_features
-        }
-        
-        # 如果是无标签模式 (intent_label=False), 则计算并添加 aux_loss
-        if not self.intent_label:
-            probs = F.softmax(logits, dim=-1)
-            # 计算负载均衡损失
-            mean_probs = torch.mean(probs, dim=0)
-            aux_loss = self.num_experts * torch.sum(mean_probs * mean_probs)
-            output["aux_loss"] = aux_loss
-            
-        return output
-
-    def forward_inference(self, x: torch.Tensor) -> Dict: # <<< 核心改动 4: 返回字典
-        """
-        推理模式下的前向传播：只计算Top-K专家。
-        """
-        x_squeezed = x.squeeze(1)
-        
-        logits = self.gating_network(x_squeezed)
-        probs = F.softmax(logits, dim=-1) # 推理时使用probs
-        
-        top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
-        
-        batch_size = x.shape[0]
-        top_k_predictions = torch.zeros(batch_size, self.top_k, self.future_steps, 2, device=x.device)
-        expert_features = self.multimodal_feature_generator(x_squeezed).view(-1, self.num_experts, self.embed_dim)
-
-        # 这里的循环为了保持与您原始代码的逻辑一致性。
-        # 推荐未来优化为torch.gather。
-        for i in range(batch_size):
-            for j in range(self.top_k):
-                expert_idx = top_k_indices[i, j]
-                feature = expert_features[i, expert_idx, :]
-                top_k_predictions[i, j] = self.experts[expert_idx](feature)
-                
-        return {
-            "predictions": top_k_predictions,
-            "probs": top_k_probs,
-            "top_k_indices": top_k_indices,
-            "mode": expert_features
-        }
-
-    def forward(self, encoder_out: torch.Tensor, training: bool, key_padding_mask=None) -> Dict:
-        # 假设输入来自编码器，我们只取第一个[CLS] token的特征
-        x = encoder_out[:, 0].unsqueeze(1) # 保持 (B, 1, D) 的形状
-        
         if training:
-            return self.forward_train(x)
+            predictions = []
+            for i in range(self.num_experts):
+                current_expert_feature = expert_features[:, i, :]
+                pred = self.experts[i](current_expert_feature)
+                predictions.append(pred)
+            all_predictions = torch.stack(predictions, dim=1)
+            
+            # --- 核心改动 3: 根据 intent_label 准备输出字典 ---
+            output = {
+                "predictions": all_predictions,
+                "logits": logits,  # 返回原始logits, 兼容两种损失函数
+                "mode": expert_features
+            }
+            
+            # 如果是无标签模式 (intent_label=False), 则计算并添加 aux_loss
+            if not self.intent_label:
+                probs = F.softmax(logits, dim=-1)
+                # 计算负载均衡损失
+                mean_probs = torch.mean(probs, dim=0)
+                aux_loss = self.num_experts * torch.sum(mean_probs * mean_probs)
+                output["aux_loss"] = aux_loss
+                
+            return output
         else:
             # 简化推理返回，直接返回字典
-            output = self.forward_inference(x)
-            return output
+            probs = F.softmax(logits, dim=-1) # 推理时使用probs
+            top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
+            batch_size = x.shape[0]
+            top_k_predictions = torch.zeros(batch_size, self.top_k, self.future_steps, 2, device=x.device)
+            expert_features = self.multimodal_feature_generator(x_squeezed).view(-1, self.num_experts, self.embed_dim)
+
+            # 这里的循环为了保持与您原始代码的逻辑一致性。
+            # 推荐未来优化为torch.gather。
+            for i in range(batch_size):
+                for j in range(self.top_k):
+                    expert_idx = top_k_indices[i, j]
+                    feature = expert_features[i, expert_idx, :]
+                    top_k_predictions[i, j] = self.experts[expert_idx](feature)
+                    
+            return {
+                "predictions": top_k_predictions,
+                "probs": top_k_probs,
+                "top_k_indices": top_k_indices,
+                "mode": expert_features
+            }
 
 class QueryBasedMoeDecoder(nn.Module):
     def __init__(self, 

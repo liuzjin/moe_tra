@@ -949,7 +949,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
         
         history_data = data[0]['x_positions']
         gt_full_future_traj = data[0]['target'] # (B, 60, 2)
-        
+        reg_loss_dict = {}
         # --- Beam Search 初始化 ---
         # `beams` is a list of tuples: (cumulative_log_prob, full_trajectory, last_input_state, memory)
         beams = [(torch.zeros(history_data.shape[0], device=self.device), # log_probs
@@ -960,6 +960,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
         # --- 自回归循环 ---
         for i in range(self.n): # 预测6个段落
             all_new_beams = []
+            step_out = {}
             for log_probs, trajectories, last_input, expert in beams:
                 # a. 准备输入并预测
                 
@@ -994,6 +995,27 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             # 根据累积概率排序
             sorted_beams = sorted(all_new_beams, key=lambda x: x[0].sum(), reverse=True)
             beams = sorted_beams[:beam_size]
+            step_pre = {}
+            step_pre['predictions'] = torch.stack([pre[:, 0, -self.n_step:] for _, pre, _, _ in beams ], dim=1)
+            step_pre['logits'] = torch.stack([pi for pi , _, _, _ in beams ], dim=1)
+            step_out['y_hat'] = step_pre
+            step_out['y_hat_others'] = beams[0][1][:, 1:, -self.n_step:]
+            step_target = last_input.copy()
+            step_target.update({"target":last_input["target"][:,:,i*self.n_step:(i+1)*self.n_step],
+                                "target_mask": last_input["target_mask"][:,:,i*self.n_step:(i+1)*self.n_step]})
+            _, cur_loss_dict = self.cal_loss(step_out, step_target, tag=i)
+            reg_loss_dict[f'val/step{i}_reg_loss'] = cur_loss_dict[f'{i}_regression_loss']
+
+        
+        # --- 循环结束，评估结果 ---
+        # 选择最终概率最高的轨迹
+        self.log_dict(
+            reg_loss_dict,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+        )
         
         # --- 循环结束，评估结果 ---
         # 选择最终概率最高的轨迹
