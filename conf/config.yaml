@@ -1,12 +1,12 @@
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_reg
-
 defaults:
   - _self_
   - datamodule: av2_moe
-  - model: MoeMotion_reg_moe
+  - model: MoeMotion_reg
+
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_reg_moe
 
 # defaults:
 #   - _self_
@@ -24,14 +24,14 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 3
+gpus: 8
 batch_size: 48
 epochs: 80
-checkpoint:  outputs/MoeMotion_reg_moe-av2_3frame_30his/20251019-121506/checkpoints/epoch_52-minADE6_0.9114865660667419.ckpt
+checkpoint:  
 submit:
-n_step: 60
+n_step: 30
 top_k: 6
-intent_label: True
+intent_label: False
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints

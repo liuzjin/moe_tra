@@ -20,7 +20,7 @@ pl_module:
     qkv_bias: False
     drop_path: 0.2
     moe: True
-    use_transformer_decoder: False
+    use_transformer_decoder: True
     query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1
