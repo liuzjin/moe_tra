@@ -446,16 +446,10 @@ class RegressionLightningModule(BaseLightningModule):
         self.log('train/teacher_forcing_ratio', teacher_forcing_ratio, on_step=False, on_epoch=True, batch_size=batch_size, sync_dist=True)
         
         total_loss = 0.0 
-        current_input = data[0]   
+        current_input = data[0] 
+        current_input['memory_dict'] = None
         for i in range(self.n):
-
             out = self(current_input, True)
-            if current_input['target'].shape[1] != out['y_hat_others'].shape[1]+1:
-                raise ValueError(
-                    f"Expected output shape: {out['y_hat']['predictions'].shape[1]}, "
-                    f"but got {current_input['target'].shape[1]}"
-                )
-            
             loss, loss_dict = self.cal_loss(out,current_input, tag=f'step{i}_')
            
             self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
@@ -464,8 +458,8 @@ class RegressionLightningModule(BaseLightningModule):
             if i == self.n - 1:
                 break
 
-            # use_teacher_forcing = (random.random() < teacher_forcing_ratio)
-            use_teacher_forcing = False
+            use_teacher_forcing = (random.random() < teacher_forcing_ratio)
+            # use_teacher_forcing = False
             if use_teacher_forcing:
                 current_input = data[i+1]
             else:
@@ -486,6 +480,7 @@ class RegressionLightningModule(BaseLightningModule):
                 pred = torch.cat([pred_segment, out['y_hat_others']], dim=1)
                 
                 current_input = self.update_state_one_with_agent_alignment(current_input, pred, i,data[i+1])
+            current_input['memory_dict'] = out['memory_dict']
         self.log('train/total_loss', total_loss, prog_bar=True)
         return total_loss
     

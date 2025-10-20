@@ -11,7 +11,7 @@ pl_module:
   schedule_type: 'linear'
   intent_label: ${intent_label}
   model:
-    _target_: realmotion.model.moemotion.MoeMotion_I
+    _target_: realmotion.model.moemotion.MoeMotion
     embed_dim: 128
     future_steps: ${n_step}
     encoder_depth: 4

@@ -1,7 +1,7 @@
-tag: MoeMotion_reg
+tag: MoeMotion_reg_moe
 
 pl_module:
-  _target_: realmotion.model.pl_modules.RegressionLightningModule
+  _target_: realmotion.model.pl_modules.Reg_moe_LightningModule
   total_epochs: ${epochs}
   modes: 6
   k: ${top_k}
@@ -9,8 +9,9 @@ pl_module:
   logits_max: False
   history_frames: 50
   schedule_type: 'linear'
+  intent_label: ${intent_label}
   model:
-    _target_: realmotion.model.moemotion.MoeMotion
+    _target_: realmotion.model.moemotion.MoeMotion_I
     embed_dim: 128
     future_steps: ${n_step}
     encoder_depth: 4
@@ -18,9 +19,14 @@ pl_module:
     mlp_ratio: 4.0
     qkv_bias: False
     drop_path: 0.2
-    moe: False
-    use_transformer_decoder: False
+    moe: True
+    use_transformer_decoder: True
+    query_cross_layers: 2
     query_self_atten: True
+    query_self_layers: 1
+    num_experts: 9
+    top_k: ${top_k}
+    intent_label: ${intent_label}
   optim:
     lr: 1e-3
     weight_decay: 1e-2
