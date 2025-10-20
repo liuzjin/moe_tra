@@ -37,11 +37,11 @@ output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 gpus: 3
 batch_size: 48
 epochs: 80
-checkpoint:  outputs/MoeMotion_reg-av2_3frame_30his/20251020-153321/checkpoints/epoch_0-minADE6_10.21270751953125.ckpt
+checkpoint: 
 submit:
 n_step: 30
 top_k: 6
-intent_label: False
+intent_label: True
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
