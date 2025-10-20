@@ -247,6 +247,8 @@ class MoeMotion_I(nn.Module):
                 'timestamp': data['timestamp'],
             }
             ret_dict['memory_dict'] = memory_dict
+        else:
+            ret_dict['memory_dict'] = None
 
         return ret_dict
 
