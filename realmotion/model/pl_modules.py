@@ -448,6 +448,8 @@ class RegressionLightningModule(BaseLightningModule):
         total_loss = 0.0 
         current_input = data[0] 
         current_input['memory_dict'] = None
+        if batch_idx == 102:
+            print("error")
         for i in range(self.n):
             out = self(current_input, True)
             loss, loss_dict = self.cal_loss(out,current_input, tag=f'step{i}_')
@@ -807,6 +809,7 @@ class RegressionLightningModule(BaseLightningModule):
         final_state_padded['target'] = next_state['target']
         final_state_padded['target_mask'] = next_state['target_mask']
         final_state_padded['intent'] = next_state['intent']
+        final_state_padded['timestamp'] = next_state['timestamp']
         # final_state_padded['x_centers'] = next_state['x_centers']
         # final_state_padded['x_positions_diff'] = next_state['x_positions_diff']
         # final_state_padded['x_angles'] = next_state['x_angles']
@@ -818,9 +821,9 @@ class RegressionLightningModule(BaseLightningModule):
         # --- 处理场景级别的元数据 ---
         final_state_padded['origin'] = new_origin
         final_state_padded['theta'] = new_theta
-        final_state_padded['timestamp'] = torch.ones(
-            batch_size, device=predict.device
-        ) * (n * self.n_step + self.history_frames) * 0.1
+        # final_state_padded['timestamp'] = torch.ones(
+        #     batch_size, device=predict.device
+        # ) * (n * self.n_step + self.history_frames) * 0.1
         
         # 从 next_state 继承其他所有非 agent-wise 的数据 (包括地图信息)
         for key, value in next_state.items():

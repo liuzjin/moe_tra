@@ -34,10 +34,10 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 8
+gpus: 3
 batch_size: 48
 epochs: 80
-checkpoint:  
+checkpoint:  outputs/MoeMotion_reg-av2_3frame_30his/20251020-153321/checkpoints/epoch_0-minADE6_10.21270751953125.ckpt
 submit:
 n_step: 30
 top_k: 6

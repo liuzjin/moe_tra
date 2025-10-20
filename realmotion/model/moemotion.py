@@ -218,6 +218,7 @@ class MoeMotion_I(nn.Module):
                     B, 1, -1, 1).repeat(1, memory_y_hat.size(1), 1, memory_y_hat.size(-1)))
                 memory_y_hat = torch.bmm((memory_y_hat - memory_traj_ori).reshape(B, -1, 2), rot_mat
                                         ).reshape(B, memory_y_hat.size(1), -1, 2)
+                
                 traj_embed = self.traj_embed(y_hat['predictions'].detach().reshape(B, y_hat['predictions'].size(1), -1))
                 memory_traj_embed = self.traj_embed(memory_y_hat.reshape(B, memory_y_hat.size(1), -1))
                 x_mode = self.traj_interact(y_hat['mode'], memory_x_mode, cur_pose, memory_pose,
