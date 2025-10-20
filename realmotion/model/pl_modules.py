@@ -448,8 +448,6 @@ class RegressionLightningModule(BaseLightningModule):
         total_loss = 0.0 
         current_input = data[0] 
         current_input['memory_dict'] = None
-        if batch_idx == 102:
-            print("error")
         for i in range(self.n):
             out = self(current_input, True)
             loss, loss_dict = self.cal_loss(out,current_input, tag=f'step{i}_')

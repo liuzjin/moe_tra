@@ -1,17 +1,17 @@
-defaults:
-  - _self_
-  - datamodule: av2_moe
-  - model: MoeMotion_reg
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_reg
 
 # defaults:
 #   - _self_
 #   - datamodule: av2_moe
 #   - model: MoeMotion_reg_moe
 
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_reg_I
+defaults:
+  - _self_
+  - datamodule: av2_moe
+  - model: MoeMotion_reg_I
 
 # defaults:
 #   - _self_
@@ -34,7 +34,7 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 3
+gpus: 8
 batch_size: 48
 epochs: 80
 checkpoint: 
