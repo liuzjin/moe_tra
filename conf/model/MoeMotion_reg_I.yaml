@@ -1,4 +1,4 @@
-tag: MoeMotion_reg
+tag: MoeMotion_reg_I
 
 pl_module:
   _target_: realmotion.model.pl_modules.RegressionLightningModule

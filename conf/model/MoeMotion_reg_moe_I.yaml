@@ -1,4 +1,4 @@
-tag: MoeMotion_reg_moe
+tag: MoeMotion_reg_moe_I
 
 pl_module:
   _target_: realmotion.model.pl_modules.Reg_moe_LightningModule
