@@ -215,7 +215,13 @@ class QueryBasedMoeDecoder(nn.Module):
         # --- 3. Logit生成器 ---
         # 从交叉注意力的输出（即每个专家的专业化特征）中，计算出该专家的得分。
         
-        self.logit_head = nn.Linear(self.embed_dim, 1)
+        # self.logit_head = nn.Linear(self.embed_dim, 1)
+        self.logit_head = nn.Sequential(
+                            nn.Linear(self.embed_dim, self.embed_dim // 2),
+                            nn.LayerNorm(self.embed_dim // 2),
+                            nn.GELU(),
+                            nn.Linear(self.embed_dim // 2, 1)
+                                    )
         # --- 4. 专家网络列表 (与之前相同) ---
         self.experts = nn.ModuleList([
             MLPExpert(self.embed_dim, self.future_steps)
