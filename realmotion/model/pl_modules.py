@@ -480,8 +480,6 @@ class RegressionLightningModule(BaseLightningModule):
                     )
                 pred = torch.cat([pred_segment, out['y_hat_others']], dim=1)
                 current_input = self.update_state_one_with_agent_alignment(current_input, pred, i,data[i+1])
-                
-                current_input = self.update_state_one_with_agent_alignment(current_input, pred, i,data[i+1])
             current_input['memory_dict'] = out['memory_dict']
         self.log('train/total_loss', total_loss, prog_bar=True)
         return total_loss
