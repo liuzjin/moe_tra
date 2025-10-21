@@ -6,7 +6,7 @@ pl_module:
   modes: 6
   k: ${top_k}
   n_step: ${n_step}
-  logits_max: False
+  logits_max: True
   history_frames: 50
   schedule_type: 'linear'
   intent_label: ${intent_label}

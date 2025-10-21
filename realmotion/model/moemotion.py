@@ -178,12 +178,6 @@ class MoeMotion_I(nn.Module):
             # scene interaction
             new_x_encoder = x_encoder
             C = x_encoder.size(-1)
-            # # new_x_encoder = self.scene_interact(new_x_encoder, memory_x_encoder, cur_pose, memory_pose, key_padding_mask=~memory_valid_mask)
-            # new_actor_feat = self.scene_interact(new_x_encoder[x_type_mask].reshape(B, -1, C), memory_x_encoder, cur_pose, memory_pose, key_padding_mask=~memory_valid_mask)
-            # new_lane_feat = self.scene_interact(new_x_encoder[~x_type_mask].reshape(B, -1, C), memory_x_encoder[~memory_type_mask].reshape(B, -1, C), cur_pose, memory_pose, key_padding_mask=~memory_valid_mask[~memory_type_mask].reshape(B, -1))
-            # new_x_encoder = torch.cat([new_actor_feat, new_lane_feat], dim=1)
-            # x_encoder = new_x_encoder * key_valid_mask.unsqueeze(-1) + x_encoder * ~key_valid_mask.unsqueeze(-1)
-
             new_actor_feat = self.scene_interact(new_x_encoder[x_type_mask].reshape(B, -1, C), memory_x_encoder, cur_pose, memory_pose, key_padding_mask=~memory_valid_mask)
             lane_feat = new_x_encoder[~x_type_mask].reshape(B, -1, C)
             new_x_encoder = torch.cat([new_actor_feat, lane_feat], dim=1)
