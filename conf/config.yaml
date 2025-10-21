@@ -37,7 +37,7 @@ output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 gpus: 1
 batch_size: 48
 epochs: 80
-checkpoint: outputs/MoeMotion_reg_moe-av2_3frame_30his/20251020-183649/checkpoints/epoch_18-minADE6_8.385870933532715.ckpt
+checkpoint: 
 submit:
 n_step: 30
 top_k: 6
