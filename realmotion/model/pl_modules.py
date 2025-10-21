@@ -458,8 +458,8 @@ class RegressionLightningModule(BaseLightningModule):
             if i == self.n - 1:
                 break
 
-            # use_teacher_forcing = (random.random() < teacher_forcing_ratio)
-            use_teacher_forcing = False
+            use_teacher_forcing = (random.random() < teacher_forcing_ratio)
+            # use_teacher_forcing = False
             if use_teacher_forcing:
                 current_input = data[i+1]
             else:
