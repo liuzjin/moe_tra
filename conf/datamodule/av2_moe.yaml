@@ -13,5 +13,5 @@ pl_module:
     num_historical_steps: 50
     split_points:
     n_step: ${n_step}
-    radius: 150.0
+    radius: 0.0
     map_radius: 0.0

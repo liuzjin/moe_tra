@@ -149,7 +149,10 @@ class Av2Dataset(Dataset):
                 [torch.sin(theta), torch.cos(theta)],
             ],
         )
-        ag_mask = torch.norm(data['x_positions'][:, step - 1] - origin, dim=-1) < self.radius
+        if self.radius > 0:
+            ag_mask = torch.norm(data['x_positions'][:, step - 1] - origin, dim=-1) < self.radius
+        else:
+            ag_mask = torch.ones(len(data['x_positions']), dtype=torch.bool)
         ag_mask = ag_mask * data['x_valid_mask'][:, step - 1]
         ag_mask[idx] = False
 

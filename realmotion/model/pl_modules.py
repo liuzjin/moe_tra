@@ -479,7 +479,7 @@ class RegressionLightningModule(BaseLightningModule):
                     )
                 pred = torch.cat([pred_segment, out['y_hat_others']], dim=1)
                 
-                current_input = self.update_state_one_with_agent_alignment(current_input, pred, i,data[i+1])
+                current_input = self.update_state_onet(current_input, pred, i,data[i+1])
             current_input['memory_dict'] = out['memory_dict']
         self.log('train/total_loss', total_loss, prog_bar=True)
         return total_loss
@@ -625,7 +625,7 @@ class RegressionLightningModule(BaseLightningModule):
         cur_data['x_centers'] = pos_ctr
         pos_diff_update = new_position[:, :, self.n_step:] - new_position[:, :, self.n_step-1:-1]
         cur_data['x_positions_diff'][:, :, 1:] = pos_diff_update[:, :, 1:]
-        cur_data['timestamp'] = torch.ones((cur_data['x_positions'].shape[0]), device=cur_data['x_positions'].device) * (n * self.n_step + self.history_frames) * 0.1
+        cur_data['timestamp'] = torch.ones((cur_data['x_positions'].shape[0]), device=cur_data['x_positions'].device) * ((n+1) * self.n_step + self.history_frames) * 0.1
         
         if next_state != None:
             cur_data['target'] = next_state['target']
@@ -1062,7 +1062,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
                     pred_av = out['y_hat']['predictions'][:, [j], ...] # (B, 10, 2)
                     pred = torch.cat([pred_av, out['y_hat_others']], dim=1)
                     
-                    next_input = self.update_state_one_with_agent_alignment(last_input, pred, i)
+                    next_input = self.update_state_one(last_input, pred, i)
 
                     if trajectories is None:
                         trajectories_pred = pred
