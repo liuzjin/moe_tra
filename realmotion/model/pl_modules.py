@@ -458,15 +458,16 @@ class RegressionLightningModule(BaseLightningModule):
             if i == self.n - 1:
                 break
 
-            use_teacher_forcing = (random.random() < teacher_forcing_ratio)
-            # use_teacher_forcing = False
+            # use_teacher_forcing = (random.random() < teacher_forcing_ratio)
+            use_teacher_forcing = False
             if use_teacher_forcing:
                 current_input = data[i+1]
             else:
                 if self.logits_max:
                     # 策略1：选择logits最大的模态
-                    _, best_mode_indices = torch.max(out['y_hat']['probs'], dim=1) # (B,)
-                    
+                    logits = out['y_hat']['logits']
+                    softmax_logits = F.softmax(logits, dim=-1)
+                    best_mode_indices = torch.argmax(softmax_logits, dim=1)
                 else:
                     # 策略2：选择与真值最接近的模态
                     gt_expanded = current_input['target'][:, 0].unsqueeze(1) # -> (B, 1, T, 2)
@@ -478,6 +479,8 @@ class RegressionLightningModule(BaseLightningModule):
                         best_mode_indices.view(-1, 1, 1, 1).expand(-1, 1, self.n_step, 2)
                     )
                 pred = torch.cat([pred_segment, out['y_hat_others']], dim=1)
+                current_input = self.update_state_one_with_agent_alignment(current_input, pred, i,data[i+1])
+                
                 current_input = self.update_state_one_with_agent_alignment(current_input, pred, i,data[i+1])
             current_input['memory_dict'] = out['memory_dict']
         self.log('train/total_loss', total_loss, prog_bar=True)
