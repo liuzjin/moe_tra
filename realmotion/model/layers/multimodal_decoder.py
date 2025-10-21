@@ -289,7 +289,6 @@ class QueryBasedMoeDecoder(nn.Module):
             return {
                 "predictions": top_k_predictions, # (B, top_k, T, 2) -> Top-K的轨迹
                 "probs": top_k_probs,              # (B, num_experts) -> 【新增】返回完整的概率分布，方便分析
-                "top_k_probs": top_k_probs,       # (B, top_k) -> Top-K的概率值
                 "top_k_indices": top_k_indices,    # (B, top_k) -> Top-K的专家索引
                 "mode":expert_features
             }

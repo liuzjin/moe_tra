@@ -8,15 +8,15 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_reg_moe
 
-defaults:
-  - _self_
-  - datamodule: av2_moe
-  - model: MoeMotion_reg_I
-
 # defaults:
 #   - _self_
 #   - datamodule: av2_moe
-#   - model: MoeMotion_reg_moe_I
+#   - model: MoeMotion_reg_I
+
+defaults:
+  - _self_
+  - datamodule: av2_moe
+  - model: MoeMotion_reg_moe_I
 
 # defaults:
 #   - _self_
@@ -34,10 +34,10 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 8
+gpus: 1
 batch_size: 48
 epochs: 80
-checkpoint: 
+checkpoint: outputs/MoeMotion_reg_moe-av2_3frame_30his/20251020-183649/checkpoints/epoch_18-minADE6_8.385870933532715.ckpt
 submit:
 n_step: 30
 top_k: 6
