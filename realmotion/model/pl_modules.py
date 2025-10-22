@@ -676,10 +676,11 @@ class RegressionLightningModule(BaseLightningModule):
             state['x_valid_mask'][:, :, self.n_step:], 
             torch.ones_like(state['x_valid_mask'][:, :, -self.n_step:])
         ], dim=2)
-
-        key_valid_mask = state['x_key_valid_mask']
-        new_time_mask = key_valid_mask.unsqueeze(-1).expand(-1, -1, self.n_step)  # (B, N, n_step)
-        updated_valid_mask[:, :, -self.n_step:] = new_time_mask
+        if self.n_step < updated_valid_mask.shape[-1]:
+            key_valid_mask = state['x_key_valid_mask']
+            new_time_mask = key_valid_mask.unsqueeze(-1).expand(-1, -1, self.n_step)
+            # (B, N, n_step)
+            updated_valid_mask[:, :, -self.n_step:] = new_time_mask
         
         predict_positions = predict + state['x_centers'].unsqueeze(-2)
         old_and_new_local_pos = torch.cat([state['x_positions'], predict_positions], dim=2)
