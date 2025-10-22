@@ -17,11 +17,7 @@ class CustomAccuracy(Metric):
         
         if isinstance(preds, dict):
             # 从预测字典中提取意图预测
-            intent_preds = preds['intent']  # [B, 6, 1]
-            
-            # 取第一个（最可能的）预测作为最终预测
-            predicted_classes = intent_preds[:, 0, :].squeeze(-1)  # [B]
-            
+            predicted_classes = preds['intent']  # [B, 6, 1]
             target = preds['intent_target']
             
         # 确保target是正确的形状

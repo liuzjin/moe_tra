@@ -366,7 +366,7 @@ def nan_hook(module, input, output):
         print(f"NaN found in the output of layer: {module}")
         # 在这里可以设置一个断点或者抛出异常来中断程序
         # import pdb; pdb.set_trace()
-class RegressionLightningModule(BaseLightningModule):
+class MoeLightningModule(BaseLightningModule):
     def __init__(self,
                  total_epochs=100,
                  modes=6,
@@ -375,6 +375,8 @@ class RegressionLightningModule(BaseLightningModule):
                  logits_max=True,
                  history_frames=50,
                  schedule_type='linear',
+                 num_experts=9,
+                 intent_label=True,
                  **kwargs):
         super().__init__(**kwargs)
         self.total_epochs = total_epochs
@@ -387,177 +389,194 @@ class RegressionLightningModule(BaseLightningModule):
         self.initial_ss_ratio = 1.0 # 初始teacher forcing概率
         self.final_ss_ratio = 0.1   # 最终teacher forcing概率
         self.schedule_type = schedule_type
+        self.intent_label = intent_label
+        self.num_experts = num_experts
 
         for name, module in self.model.named_modules():
             module.register_forward_hook(nan_hook)
-        
-        self.metrics = MetricCollection(
-            {
-                'minADE1': minADE(k=1),
-                'minADE6': minADE(k=6),
-                'minFDE1': minFDE(k=1),
-                'minFDE6': minFDE(k=6),
-                'MR': MR(),
-                'b-minFDE6': brier_minFDE(k=6)
-            }
-        )
     
     def forward(self, data, mode):
         return self.model(data, mode)
-    def cal_loss(self, out, data, tag):
-        gt_segment, y_others = data['target'][:, 0], data['target'][:, 1:]
+    def cal_loss(self, out, data):
+        # --- 1. 准备真值数据 ---
+        # 确保只取需要的总长度，例如 60 步
+        gt_traj = data['target'][:, 0, :] 
+        y_others = data['target'][:, 1:]
         others_reg_mask = data['target_mask'][:, 1:]
+
+        # --- 2. 准备模型输出 ---
+        # 从新的模型输出 'out' 中获取数据
+        # 注意：为了清晰，我们假设 'out' 就是模型直接的返回，不再有 'y_hat' 嵌套
+        predictions = out['y_hat']['predictions']             # (B, K, T, 2) - K个多模态轨迹
+        y_hat_others = out.get('y_hat_others')       # 其他智能体的预测
+        mode_logits = out['y_hat']['logits']                  # (B, K) - 全局模态概率
+        segment_logits_per_mode = out['y_hat']['segment_logits_per_mode'] # (B, K, S, N) - 分段意图logits
         
-        predictions = out['y_hat']['predictions']
-        y_hat_others = out['y_hat_others']
-        pi = out['y_hat']['logits']
+        # --- 3. 计算核心损失 ---
 
-        l2_norm = torch.norm(predictions[..., :2] - gt_segment.unsqueeze(1), dim=-1).sum(dim=-1)
-
-        best_mode = torch.argmin(l2_norm, dim=-1)
-        y_hat_best = predictions[torch.arange(predictions.shape[0]), best_mode]
-
-        gating_loss = F.cross_entropy(pi, best_mode.detach())
-
-        regression_loss = F.smooth_l1_loss(y_hat_best, gt_segment)
-        others_reg_loss = F.smooth_l1_loss(
-            y_hat_others[others_reg_mask], y_others[others_reg_mask]
-        )
-
-        # 3. 总损失
-        total_loss = regression_loss +  gating_loss  + others_reg_loss
+        # a) 多模态回归损失 (Oracle Loss)
+        #    找到 K 个模态中，离真值最近的那个
+        gt_expanded = gt_traj.unsqueeze(1) # (B, 1, T, 2)
+        # 计算每个模态的平均L2误差
+        l2_dist_per_mode = torch.norm(predictions - gt_expanded, p=2, dim=-1).mean(dim=-1) # (B, K)
         
+        # best_mode_indices 是每个样本中最优模态的索引 (B,)
+        # 这是我们后续损失计算的 "伪标签" 或 "Oracle"
+        _, best_mode_indices = torch.min(l2_dist_per_mode, dim=-1)
+        
+        # 从所有预测中，选出每个样本对应的最优轨迹
+        # predictions[torch.arange(batch_size), best_mode_indices]
+        y_hat_best = predictions[torch.arange(predictions.shape[0]), best_mode_indices] # (B, T, 2)
+        
+        # 回归损失只基于这个最优轨迹进行计算
+        regression_loss = F.smooth_l1_loss(y_hat_best, gt_traj)
 
+        # b) 全局模态概率损失
+        #    目标是让门控网络学会给最优的那个模态（best_mode_indices）赋予最高概率
+        #    这变成了一个标准的分类问题
+        mode_gating_loss = F.cross_entropy(mode_logits, best_mode_indices.detach())
+
+        # c) 分段意图分类损失 (Gating Loss for Segments)
+        segment_gating_loss = torch.tensor(0.0, device=gt_traj.device)
+        # 只在训练时、且开启了意图标签模式、且数据中真的有标签时，才计算
+        if self.training and self.intent_label and 'intent' in data:
+            gt_intent_seq = data.get('intent') # (B, S)
+            gt_intent_seq = gt_intent_seq[:, 0, :]
+            if gt_intent_seq is not None:
+                # 从 (B, K, S, N) 的分段logits中，只选出那个被认定为最优模态的logits
+                # 使用 gather 高效地选取
+                indices_for_gather = best_mode_indices.view(-1, 1, 1, 1).expand(
+                    -1, 1, self.n, self.num_experts
+                )
+                # best_segment_logits: (B, 1, S, N) -> (B, S, N)
+                best_segment_logits = torch.gather(segment_logits_per_mode, 1, indices_for_gather).squeeze(1)
+
+                # 计算交叉熵损失
+                segment_gating_loss = F.cross_entropy(
+                    best_segment_logits.reshape(-1, self.num_experts), 
+                    gt_intent_seq.reshape(-1)
+                )
+
+        # d) 其他智能体的回归损失 (保持不变)
+        others_reg_loss = torch.tensor(0.0, device=gt_traj.device)
+        if y_hat_others is not None and y_others.numel() > 0:
+            if others_reg_mask.sum() > 0:
+                others_reg_loss = F.smooth_l1_loss(
+                    y_hat_others[others_reg_mask], y_others[others_reg_mask]
+                )
+
+        # --- 4. 计算总损失 ---
+        # 权重 g_weight_mode, g_weight_segment, o_weight 是需要调整的超参数
+        g_weight_mode = 1.0
+        g_weight_segment = 0.5
+        o_weight = 1.0 # 其他智能体的损失权重
+        
+        total_loss = (regression_loss + 
+                    g_weight_mode * mode_gating_loss + 
+                    g_weight_segment * segment_gating_loss +
+                    o_weight * others_reg_loss)
+        
+        # --- 5. 构建日志字典 ---
         loss_dict = {
-            f'{tag}_loss': total_loss.item(),
-            f'{tag}_gating_loss': gating_loss.item(),
-            f'{tag}_regression_loss': regression_loss.item(),
-            f'{tag}_others_reg_loss': others_reg_loss.item(),
+            'total_loss': total_loss.item(),
+            'regression_loss': regression_loss.item(),
+            'mode_gating_loss': mode_gating_loss.item(),
+            'segment_gating_loss': segment_gating_loss.item(),
+            'others_reg_loss': others_reg_loss.item(),
         }
         return total_loss, loss_dict
     
     def training_step(self, data, batch_idx):
         self.train()
-        teacher_forcing_ratio = get_teacher_forcing_ratio(
-            self.current_epoch, self.total_epochs, self.schedule_type, self.initial_ss_ratio, self.final_ss_ratio
-        )
-        # self.log('train/teacher_forcing_ratio', teacher_forcing_ratio, on_step=False, on_epoch=True)
-        batch_size = data[0]['x_positions'].shape[0]  # 获取批次大小
-        self.log('train/teacher_forcing_ratio', teacher_forcing_ratio, on_step=False, on_epoch=True, batch_size=batch_size, sync_dist=True)
+        out = self(data, True)
+        loss, loss_dict = self.cal_loss(out,data)
+
+        self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
+        self.log('train/loss', loss, prog_bar=True)
+        return loss
+    def cal_eval_loss(self, out, data):
+        """
+        计算用于监控的评估损失。
+        这个损失反映了模型在没有"上帝视角"下的真实性能。
+        """
+        gt_traj = data['target'][:, 0, :]
+        y_others = data['target'][:, 1:]
+        others_reg_mask = data['target_mask'][:, 1:]
         
-        total_loss = 0.0 
-        current_input = data[0] 
-        current_input['memory_dict'] = None
-        for i in range(self.n):
-            out = self(current_input, True)
-            loss, loss_dict = self.cal_loss(out,current_input, tag=f'step{i}_')
-           
-            self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
-            total_loss += loss
+        # --- 1. 准备模型输出 ---
+        predictions = out['y_hat']['predictions'] # (B, K, T, 2)
+        mode_logits = out['y_hat']['logits']      # (B, K)
 
-            if i == self.n - 1:
-                break
 
-            use_teacher_forcing = (random.random() < teacher_forcing_ratio)
-            # use_teacher_forcing = False
-            if use_teacher_forcing:
-                current_input = data[i+1]
-            else:
-                if self.logits_max:
-                    # 策略1：选择logits最大的模态
-                    logits = out['y_hat']['logits']
-                    softmax_logits = F.softmax(logits, dim=-1)
-                    best_mode_indices = torch.argmax(softmax_logits, dim=1)
-                else:
-                    # 策略2：选择与真值最接近的模态
-                    gt_expanded = current_input['target'][:, 0].unsqueeze(1) # -> (B, 1, T, 2)
-                    l2_norm = torch.norm(out['y_hat']['predictions'] - gt_expanded, dim=-1).sum(dim=-1)
-                    _, best_mode_indices = torch.min(l2_norm, dim=-1) # (B,)
+        # --- 2. Top-1 回归损失 ---
+        #    找到概率最高的模态，并计算其与真值的回归误差。
+        #    这是评估模型单轨迹预测性能的核心。
+        _, top1_indices = torch.max(mode_logits, dim=-1)
+        top1_predictions = predictions[torch.arange(predictions.shape[0]), top1_indices]
+        
+        top1_regression_loss = F.smooth_l1_loss(top1_predictions, gt_traj)
 
-                pred_segment = torch.gather(
-                        out['y_hat']['predictions'], 1,
-                        best_mode_indices.view(-1, 1, 1, 1).expand(-1, 1, self.n_step, 2)
-                    )
-                pred = torch.cat([pred_segment, out['y_hat_others']], dim=1)
-                current_input = self.update_state_one_with_agent_alignment(current_input, pred, i,data[i+1])
-            current_input['memory_dict'] = out['memory_dict']
-        self.log('train/total_loss', total_loss, prog_bar=True)
-        return total_loss
-    
+        # --- 3. 分段意图准确率 (Gating Accuracy) ---
+        #    如果提供了意图标签，我们可以计算门控的准确率，而不是损失。
+        #    这能更直观地反映门控网络的性能。
+        segment_gating_acc = torch.tensor(0.0, device=gt_traj.device)
+        if self.intent_label and 'intent' in data:
+            gt_intent_seq = data.get('intent') # (B, S)
+            gt_intent_seq = gt_intent_seq[:, 0, :]
+            if gt_intent_seq is not None:
+                # 找到 Top-1 模态对应的专家规划路径
+                segment_logits_per_mode = out['y_hat']['segment_logits_per_mode'] # (B, K, S, N)
+                top1_segment_logits = segment_logits_per_mode[torch.arange(predictions.shape[0]), top1_indices] # (B, S, N)
+                
+                # 计算预测的意图
+                pred_intent_seq = torch.argmax(top1_segment_logits, dim=-1) # (B, S)
+                
+                # 计算准确率
+                segment_gating_acc = (pred_intent_seq == gt_intent_seq).float().mean()
+                
+        # --- 4. 其他智能体的损失 (保持可选) ---
+        others_reg_loss = torch.tensor(0.0, device=gt_traj.device)
+        y_hat_others = out.get('y_hat_others')
+        others_reg_loss = F.smooth_l1_loss(
+        y_hat_others[others_reg_mask], y_others[others_reg_mask]) 
+
+        # --- 5. 计算总损失 ---
+        # 在评估时，总损失主要由 top-1 回归损失定义
+        total_loss = top1_regression_loss + others_reg_loss
+
+        loss_dict = {
+            'total_loss': total_loss.item(),
+            'top1_regression_loss': top1_regression_loss.item(),
+            'segment_gating_accuracy': segment_gating_acc.item(), # 改为记录准确率
+            'others_reg_loss': others_reg_loss.item(),
+        }
+        
+        return total_loss, loss_dict
     def validation_step(self, data, batch_idx):
         self.eval()
-        beam_size = self.modes # 使用所有模态作为beam size
+        out = self(data, False)
         
-        history_data = data[0]['x_positions']
-        gt_full_future_traj = data[0]['target'] # (B, 60, 2)
-        reg_loss_dict = {}
-        # --- Beam Search 初始化 ---
-        # `beams` is a list of tuples: (cumulative_log_prob, full_trajectory, last_input_state, memory)
-        beams = [(torch.zeros(history_data.shape[0], device=self.device), # log_probs
-                  None, # 初始轨迹
-                  data[0]               # 初始输入
-                  )]                 
-
-        # --- 自回归循环 ---
-        for i in range(self.n): # 预测6个段落
-            all_new_beams = []
-            step_out = {}
-            for log_probs, trajectories, last_input, in beams:
-                # a. 准备输入并预测
-                
-                out = self(last_input, False)
-                step_log_probs = torch.log(out['y_hat']['probs'])
-                
-                for j in range(self.k):
-
-                    new_log_probs = log_probs + step_log_probs[:, j]
-                    pred_av = out['y_hat']['predictions'][:, [j], ...] # (B, 10, 2)
-                    pred = torch.cat([pred_av, out['y_hat_others']], dim=1)
-                    
-                    next_input = self.update_state_one_with_agent_alignment(last_input, pred, i)
-
-                    if trajectories is None:
-                        trajectories_pred = pred
-                    else:
-                        trajectories_pred = torch.cat([trajectories, pred], dim=2)
-                    
-                    all_new_beams.append((new_log_probs, trajectories_pred, next_input))
-            
-            # --- 筛选 Top-K Beams ---
-            # 根据累积概率排序
-            sorted_beams = sorted(all_new_beams, key=lambda x: x[0].sum(), reverse=True)
-            beams = sorted_beams[:beam_size]
-            step_pre = {}
-            step_pre['predictions'] = torch.stack([pre[:, 0, -self.n_step:] for _, pre, _ in beams ], dim=1)
-            step_pre['logits'] = torch.stack([pi for pi , _, _ in beams ], dim=1)
-            step_out['y_hat'] = step_pre
-            step_out['y_hat_others'] = beams[0][1][:, 1:, -self.n_step:]
-            step_target = last_input.copy()
-            step_target.update({"target":last_input["target"][:,:,i*self.n_step:(i+1)*self.n_step],
-                                "target_mask": last_input["target_mask"][:,:,i*self.n_step:(i+1)*self.n_step]})
-            _, cur_loss_dict = self.cal_loss(step_out, step_target, tag=i)
-            reg_loss_dict[f'val/step{i}_reg_loss'] = cur_loss_dict[f'{i}_regression_loss']
-
+        # --- 2. 计算并记录验证损失 ---
+        # 调用下面新写的 cal_eval_loss
+        loss, loss_dict = self.cal_eval_loss(out, data)
         
-        # --- 循环结束，评估结果 ---
-        # 选择最终概率最高的轨迹
-        self.log_dict(
-            reg_loss_dict,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            sync_dist=True,
-        )
-        final_predictions = {'y_hat': [x[1][:, 0] for x in beams], 
-                             'pi': [torch.exp(x[0]) for x in beams]}
-    
-        final_predictions['y_hat'] = torch.stack(final_predictions['y_hat'], dim=1) # (B, beam_size, 60, 2)
-        final_predictions['pi'] = torch.stack(final_predictions['pi'], dim=1)
-        final_predictions['pi'] = torch.softmax(final_predictions['pi'], dim=-1)
-        # 计算评估指标
-
-        metrics = self.metrics(final_predictions, gt_full_future_traj[:, 0])
-
+        # 添加 stage 前缀 (val/ or test/) 并记录
+        self.log_dict({f"{k}": v for k, v in loss_dict.items()}, 
+                    on_step=False, on_epoch=True, sync_dist=True)
+        mode_logits = out['y_hat']['logits']      # (B, K)
+        _, top1_indices = torch.max(mode_logits, dim=-1)
+        segment_logits_per_mode = out['y_hat']['segment_logits_per_mode'] # (B, K, S, N)
+        top1_segment_logits = segment_logits_per_mode[torch.arange(out['y_hat']['predictions'].shape[0]), top1_indices] # (B, S, N)
+        pred_intent_seq = torch.argmax(top1_segment_logits, dim=-1) # (B, S)
+                
+        out = {
+            'y_hat': out['y_hat']['predictions'],
+            'pi': out['y_hat']['pi'],
+            'y_hat_others': out['y_hat_others'],
+            'intent': pred_intent_seq,
+            'intent_target': data['intent'][:, 0],
+        }
+        metrics = self.metrics(out, data['target'][:, 0])
         self.log_dict(
             metrics,
             prog_bar=True,
@@ -566,7 +585,7 @@ class RegressionLightningModule(BaseLightningModule):
             batch_size=1,
             sync_dist=True,
         )
-    
+
     def test_step(self, data, batch_idx) -> None:
         memory_dict = None
         all_outs = []
@@ -576,274 +595,7 @@ class RegressionLightningModule(BaseLightningModule):
             all_outs.append(out)
         self.submission_handler.format_data(data[-1], all_outs[-1]['y_hat'], all_outs[-1]['pi'])
 
-    def update_state_one(
-        self,
-        state, 
-        predict,
-        n, 
-        next_state=None,
-        dt=0.1 
-    ):
-        cur_data = state.copy()
-        last_origin = cur_data['origin'] # (B, 1, 2)
-        last_theta = cur_data['theta']   # (B, 1)
-
-        # 构造旋转矩阵的逆 (用于从局部转全局)
-        cos_theta = torch.cos(last_theta)
-        sin_theta = torch.sin(last_theta)
-        # 注意这里是转置/逆
-        row1 = torch.stack([cos_theta, sin_theta], dim=1)    # (B, 2)
-        row2 = torch.stack([-sin_theta, cos_theta], dim=1)   # (B, 2)
-        rotate_mat_inv = torch.stack([row1, row2], dim=1)  # (B, 2, 2)
-        cur_data['x_valid_mask'] = torch.cat([cur_data['x_valid_mask'][:,:,  self.n_step:], cur_data['x_valid_mask'][:,:, -self.n_step:]], dim=2)
-        
-        old_position = torch.cat([cur_data['x_positions'], predict + cur_data['x_centers'].unsqueeze(-2)], dim=2)
-        raw_pred_position = torch.matmul(old_position, rotate_mat_inv.unsqueeze(1)) + last_origin.unsqueeze(1).unsqueeze(1)
-        predict_position_diff = raw_pred_position[:, :, 1:] - raw_pred_position[:, :,:-1]
-        predict_diff_norm = torch.norm(predict_position_diff, dim=-1)
-        predict_velocity = predict_diff_norm / dt
-        cur_data['x_velocity'] = torch.cat([cur_data['x_velocity'][:, :, self.n_step:], predict_velocity[:, :, -self.n_step:]], dim=2)
-        x_vel = cur_data['x_velocity'][..., -(self.n_step+1):]
-        x_vel_diff = x_vel[:, :, 1:] - x_vel[:, :, :-1]
-        cur_data['x_velocity_diff'] = torch.cat([cur_data['x_velocity_diff'][:, :, self.n_step:], x_vel_diff], dim=2)
-        pre_headings = torch.arctan2(predict_position_diff[:, :, -self.n_step:, 1], predict_position_diff[:, :, -self.n_step:, 0])
-        cur_data['x_angles'] = torch.cat([cur_data['x_angles'][:, :, self.n_step:], pre_headings], dim=2)
-
-        origin = raw_pred_position[:, 0, -1]
-        theta = cur_data['x_angles'][:, 0, -1]
-
-        cur_data['origin'] = origin
-        cur_data['theta'] = theta
-        cos_theta_new = torch.cos(theta)
-        sin_theta_new = torch.sin(theta)
-        row1_new = torch.stack([cos_theta_new, -sin_theta_new], dim=1) # (B, 2)
-        row2_new = torch.stack([sin_theta_new, cos_theta_new], dim=1)  # (B, 2)
-        rotate_mat = torch.stack([row1_new, row2_new], dim=1) # (B, 2, 2)
-        new_position = torch.matmul(raw_pred_position - origin.unsqueeze(1).unsqueeze(1), rotate_mat.unsqueeze(1))
-        cur_data['x_positions'] = new_position[:, :, self.n_step:]
-        pos_ctr = new_position[:, :, -1]
-        cur_data['x_centers'] = pos_ctr
-        pos_diff_update = new_position[:, :, self.n_step:] - new_position[:, :, self.n_step-1:-1]
-        cur_data['x_positions_diff'][:, :, 1:] = pos_diff_update[:, :, 1:]
-        cur_data['timestamp'] = torch.ones((cur_data['x_positions'].shape[0]), device=cur_data['x_positions'].device) * ((n+1) * self.n_step + self.history_frames) * 0.1
-        
-        if next_state != None:
-            cur_data['target'] = next_state['target']
-            cur_data['target_mask'] = next_state['target_mask']
-            cur_data['intent'] = next_state['intent']
-        
-        return cur_data
-    def update_state_one_with_agent_alignment(
-            self,
-            state, 
-            predict,
-            n, 
-            next_state = None,
-            dt: float = 0.1 
-        ):
-        """
-        自回归更新函数，增加了基于agent_indices的智能体对齐和状态合并逻辑。
-
-        Args:
-            state (Dict): 当前的批次状态字典。
-            predict (torch.Tensor): 模型对当前批次中智能体的预测，
-                                    形状为 (B, K_old, self.n_step, 2)。
-            n (int): 当前是第 n 次自回归。
-            next_state (Optional[Dict]): 下一个时间窗口的批次数据字典。
-                                        如果提供了，将用于更新agent集合。
-            dt (float): 时间步长。
-
-        Returns:
-            Dict: 更新后的批次状态字典。
-        """
-        
-        # --------------------------------------------------------------------------
-        # 步骤 1: 像之前一样，对当前批次中的所有智能体进行物理状态更新 (局部 -> 全局 -> 新局部)
-        # --------------------------------------------------------------------------
-        # last_origin/theta 形状: (B, 2) / (B,)
-        last_origin = state['origin'] 
-        last_theta = state['theta']
-        batch_size = last_origin.shape[0]
-        history_len = state['x_positions'].shape[2]
-
-        cos_theta = torch.cos(last_theta)
-        sin_theta = torch.sin(last_theta)
-        row1 = torch.stack([cos_theta, sin_theta], dim=1)
-        row2 = torch.stack([-sin_theta, cos_theta], dim=1)
-        rotate_mat_inv = torch.stack([row1, row2], dim=1)  # (B, 2, 2)
-
-        updated_valid_mask = torch.cat([
-            state['x_valid_mask'][:, :, self.n_step:], 
-            torch.ones_like(state['x_valid_mask'][:, :, -self.n_step:])
-        ], dim=2)
-        if self.n_step < updated_valid_mask.shape[-1]:
-            key_valid_mask = state['x_key_valid_mask']
-            new_time_mask = key_valid_mask.unsqueeze(-1).expand(-1, -1, self.n_step)
-            # (B, N, n_step)
-            updated_valid_mask[:, :, -self.n_step:] = new_time_mask
-        
-        predict_positions = predict + state['x_centers'].unsqueeze(-2)
-        old_and_new_local_pos = torch.cat([state['x_positions'], predict_positions], dim=2)
-
-        raw_pred_position = torch.matmul(
-            old_and_new_local_pos, rotate_mat_inv.unsqueeze(1)
-        ) + last_origin.unsqueeze(1).unsqueeze(1)
-
-        predict_position_diff = raw_pred_position[:, :, 1:] - raw_pred_position[:, :, :-1]
-        predict_diff_norm = torch.norm(predict_position_diff, p=2, dim=-1)
-        predict_velocity = predict_diff_norm / dt
-        
-        updated_velocity = torch.cat([
-            state['x_velocity'][:, :, self.n_step:], 
-            predict_velocity[:, :, -self.n_step:]
-        ], dim=2)
-        
-        x_vel = updated_velocity[..., -(self.n_step + 1):]
-        x_vel_diff = x_vel[:, :, 1:] - x_vel[:, :, :-1]
-        updated_velocity_diff = torch.cat([state['x_velocity_diff'][:, :, self.n_step:], x_vel_diff], dim=2)
-        
-        pre_headings = torch.atan2(predict_position_diff[:, :, -self.n_step:, 1], 
-                                predict_position_diff[:, :, -self.n_step:, 0])
-        updated_angles = torch.cat([state['x_angles'][:, :, self.n_step:], pre_headings], dim=2)
-
-        new_origin = raw_pred_position[:, 0, -1]
-        new_theta = updated_angles[:, 0, -1]
-
-        cos_theta_new = torch.cos(new_theta)
-        sin_theta_new = torch.sin(new_theta)
-        row1_new = torch.stack([cos_theta_new, -sin_theta_new], dim=1)
-        row2_new = torch.stack([sin_theta_new, cos_theta_new], dim=1)
-        rotate_mat = torch.stack([row1_new, row2_new], dim=1)
-
-        new_local_position = torch.matmul(
-            raw_pred_position - new_origin.unsqueeze(1).unsqueeze(1),
-            rotate_mat.unsqueeze(1)
-        )
-        
-        updated_positions = new_local_position[:, :, -history_len:]
-        updated_centers = new_local_position[:, :, -1]
-        pos_diff_update = new_local_position[:, :, 1:] - new_local_position[:, :, :-1]
-        updated_positions_diff = pos_diff_update[:, :, -history_len:]
-        
-        # --------------------------------------------------------------------------
-        # 步骤 2: 如果没有 next_state，直接用更新后的物理状态构建并返回结果
-        # --------------------------------------------------------------------------
-        if next_state is None:
-            final_state = state.copy()
-            final_state.update({
-                'origin': new_origin, 'theta': new_theta,
-                'x_valid_mask': updated_valid_mask, 'x_velocity': updated_velocity,
-                'x_velocity_diff': updated_velocity_diff, 'x_angles': updated_angles,
-                'x_positions': updated_positions, 'x_centers': updated_centers,
-                'x_positions_diff': updated_positions_diff,
-                'timestamp': torch.ones(batch_size, device=predict.device) * (n * self.n_step + self.history_frames) * 0.1
-            })
-            return final_state
-
-        # --------------------------------------------------------------------------
-        # 步骤 3: 核心逻辑 - 逐个场景进行智能体对齐和状态合并
-        # --------------------------------------------------------------------------
-        old_agent_indices_list = state['agent_indices']
-        new_agent_indices_list = next_state['agent_indices']
-        
-        # --- 【修正】只定义需要我们手动更新和对齐的 agent-wise 键 ---
-        # 移除了 'target', 'target_mask', 'intent'
-        agent_wise_keys_to_align = [
-            'x_positions', 'x_centers', 'x_positions_diff', 'x_angles',
-            'x_velocity', 'x_velocity_diff', 'x_valid_mask', 'x_attr',
-        ]
-        # agent_wise_keys_to_align = [
-        #     'x_positions', 'x_velocity_diff'
-        # ]
-
-        # 收集最终批次数据的列表
-        final_tensors_list = {key: [] for key in agent_wise_keys_to_align}
-        
-        for i in range(batch_size):
-            # --- 为当前场景 (i) 准备数据和ID映射 ---
-            old_ids = old_agent_indices_list[i]
-            new_ids = new_agent_indices_list[i]
-            old_id_to_idx = {id_val.item(): idx for idx, id_val in enumerate(old_ids)}
-            
-            # 收集当前场景最终状态的行
-            rows_to_stack = {key: [] for key in agent_wise_keys_to_align}
-
-            # --- 遍历 next_state 中的所有智能体 ---
-            for new_idx, agent_id_val in enumerate(new_ids):
-                agent_id = agent_id_val.item()
-                
-                if agent_id in old_id_to_idx:
-                    # --- Case 1: 公共智能体 -> 使用自回归更新的状态 ---
-                    old_idx = old_id_to_idx[agent_id]
-                    
-                    rows_to_stack['x_positions'].append(updated_positions[i, old_idx])
-                    rows_to_stack['x_centers'].append(updated_centers[i, old_idx])
-                    rows_to_stack['x_positions_diff'].append(updated_positions_diff[i, old_idx])
-                    rows_to_stack['x_angles'].append(updated_angles[i, old_idx])
-                    rows_to_stack['x_velocity'].append(updated_velocity[i, old_idx])
-                    rows_to_stack['x_velocity_diff'].append(updated_velocity_diff[i, old_idx])
-                    rows_to_stack['x_valid_mask'].append(updated_valid_mask[i, old_idx])
-                    rows_to_stack['x_attr'].append(state['x_attr'][i, old_idx])
-                    
-                else:
-                    # --- Case 2: 新出现的智能体 -> 直接复制 next_state 的状态 ---
-                    for key in agent_wise_keys_to_align:
-                        # 从 next_state 中复制对应的行
-                        rows_to_stack[key].append(next_state[key][i, new_idx])
-            
-            # 将收集到的行堆叠起来
-            for key, rows in rows_to_stack.items():
-                if rows:
-                    final_tensors_list[key].append(torch.stack(rows, dim=0))
-
-        # --- 重新打包为最终的批次状态字典 ---
-        final_state_padded = {}
-        
-        # 使用 pad_sequence 对齐 agent 维度 (只处理我们对齐过的键)
-        for key, tensor_list in final_tensors_list.items():
-            if tensor_list:
-                is_mask = 'mask' in key
-                padding_value = False if is_mask else 0.0
-                final_state_padded[key] = pad_sequence(
-                    tensor_list, batch_first=True, padding_value=padding_value
-                )
-        
-        # --- 【核心修改】直接从 next_state 继承 target, target_mask, 和 intent ---
-        final_state_padded['target'] = next_state['target']
-        final_state_padded['target_mask'] = next_state['target_mask']
-        final_state_padded['intent'] = next_state['intent']
-        final_state_padded['timestamp'] = next_state['timestamp']
-        # final_state_padded['x_centers'] = next_state['x_centers']
-        # final_state_padded['x_positions_diff'] = next_state['x_positions_diff']
-        # final_state_padded['x_angles'] = next_state['x_angles']
-        # final_state_padded['x_velocity'] = next_state['x_velocity']
-        # final_state_padded['x_velocity_diff'] = next_state['x_velocity_diff']
-        # final_state_padded['x_valid_mask'] = next_state['x_valid_mask']
-        # final_state_padded['x_attr'] = next_state['x_attr']
-
-        # --- 处理场景级别的元数据 ---
-        final_state_padded['origin'] = new_origin
-        final_state_padded['theta'] = new_theta
-        # final_state_padded['timestamp'] = torch.ones(
-        #     batch_size, device=predict.device
-        # ) * (n * self.n_step + self.history_frames) * 0.1
-        
-        # 从 next_state 继承其他所有非 agent-wise 的数据 (包括地图信息)
-        for key, value in next_state.items():
-            # 只复制那些我们还没有处理过的键
-            if key not in final_state_padded:
-                final_state_padded[key] = value
-                
-        # 计算新的 key_valid_mask
-        if 'x_valid_mask' in final_state_padded:
-            final_state_padded['x_key_valid_mask'] = final_state_padded['x_valid_mask'].any(-1)
-        # 在 return final_state_padded 前添加以下代码块
-        for key, value in final_state_padded.items():
-            if isinstance(value, torch.Tensor):
-                final_state_padded[key] = value.detach()
-        return final_state_padded
-    
-class Reg_moe_LightningModule(RegressionLightningModule):
+class Reg_moe_LightningModule(MoeLightningModule):
     def __init__(self,intent_label,
                  **kwargs):
         super().__init__(**kwargs)
@@ -1139,7 +891,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             sync_dist=True,
         )
     
-    def test_step(self, data, batch_idx) -> None:
+
         memory_dict = None
         all_outs = []
         for i in range(len(data)):

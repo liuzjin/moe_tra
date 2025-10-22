@@ -1,22 +1,8 @@
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_reg
-
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_reg_moe
-
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_reg_I
-
 defaults:
   - _self_
   - datamodule: av2_moe
-  - model: MoeMotion_reg_moe_I
+  - model: MoeMotion_moe
+
 
 # defaults:
 #   - _self_
@@ -39,8 +25,11 @@ batch_size: 48
 epochs: 80
 checkpoint: 
 submit:
-n_step: 60
+n_step: 30
 top_k: 6
+num_experts: 9
+future_len: 60
+
 intent_label: True
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint

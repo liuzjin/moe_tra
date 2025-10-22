@@ -25,16 +25,7 @@ class Av2Dataset(Dataset):
         self.num_historical_steps = num_historical_steps
         self.n_step = n_step
         self.split = split
-        if split_points is None and n_step is not None:
-            if split == 'train':
-                self.split_points = list(range(50, 110, n_step))
-                self.num_future_steps = n_step 
-            else:
-                self.split_points = [50]
-                self.num_future_steps = 60
-        else:
-            self.split_points = split_points
-            self.num_future_steps = 0 if split =='test' else 60
+        self.num_future_steps = 0 if split =='test' else 60
         self.radius = radius
         self.map_radius = map_radius
     
@@ -51,11 +42,8 @@ class Av2Dataset(Dataset):
         return data
     
     def process(self, data):
-        sequence_data = []
-        for cur_step in self.split_points:
-            ag_dict = self.process_single_agent(data, cur_step)
-            sequence_data.append(ag_dict)
-        return sequence_data
+        ag_dict = self.process_single_agent(data)
+        return ag_dict
 
     def resample_intent_labels(self,
         intent_sequence, 
@@ -138,7 +126,8 @@ class Av2Dataset(Dataset):
         # 将结果列表转换为张量，并确保它在原始设备上
         return torch.tensor(batch_results, dtype=torch.long, device=intent_sequence.device)
 
-    def process_single_agent(self, data, step=50):
+    def process_single_agent(self, data):
+        step = self.num_historical_steps
         idx = data['focal_idx']
         cur_agent_id = data['agent_ids'][idx]
         origin = data['x_positions'][idx, step - 1]
@@ -170,13 +159,8 @@ class Av2Dataset(Dataset):
         
         intent_series = data['driving_intent_sequence'][self.n_step]
         if self.n_step is not None:
-            if self.split == 'train':
-                k = (step - self.num_historical_steps) // self.n_step
-                intent = intent_series[:, [k]]
-                intent = torch.cat([intent[[idx]], intent[ag_mask]])
-            else:
-                intent = intent_series
-                intent = torch.cat([intent[[idx]], intent[ag_mask]])
+            intent = intent_series
+            intent = torch.cat([intent[[idx]], intent[ag_mask]])
         else:
            intent = torch.ones(pos.shape[0], 1, dtype=torch.long) * 8
         
@@ -295,57 +279,73 @@ class Av2Dataset(Dataset):
         }
 
     
-def collate_fn(seq_batch):
-    seq_data = []
-    for i in range(len(seq_batch[0])):
-        batch = [b[i] for b in seq_batch]
-        data = {}
-
-        for key in [
-            'x_positions_diff',
-            'x_attr',
-            'x_positions',
-            'x_centers',
-            'x_angles',
-            'x_velocity',
-            'x_velocity_diff',
-            'lane_positions',
-            'lane_centers',
-            'lane_angles',
-            'lane_attr',
-            'is_intersections',
-        ]:
+def collate_fn(batch):
+    """
+    处理批次数据，每条数据是一个字典（而非列表）
+    对具有不同维度的张量进行填充以形成批次
+    """
+    data = {}
+    
+    # 需要使用 pad_sequence 填充的字段
+    padded_fields = [
+        'x_positions_diff',
+        'x_attr',
+        'x_positions',
+        'x_centers',
+        'x_angles',
+        'x_velocity',
+        'x_velocity_diff',
+        'lane_positions',
+        'lane_centers',
+        'lane_angles',
+        'lane_attr',
+        'is_intersections',
+    ]
+    
+    # 对需要填充的字段进行批处理
+    for key in padded_fields:
+        if key in batch[0]:
             data[key] = pad_sequence([b[key] for b in batch], batch_first=True)
-
-        if 'x_scored' in batch[0]:
-            data['x_scored'] = pad_sequence(
-                [b['x_scored'] for b in batch], batch_first=True
-            )
-
-        if batch[0]['target'] is not None:
-            data['target'] = pad_sequence([b['target'] for b in batch], batch_first=True)
-            data['target_mask'] = pad_sequence(
-                [b['target_mask'] for b in batch], batch_first=True, padding_value=False
-            )
-
-        for key in ['x_valid_mask', 'lane_valid_mask']:
+    
+    # 处理可选字段 x_scored
+    if 'x_scored' in batch[0]:
+        data['x_scored'] = pad_sequence(
+            [b['x_scored'] for b in batch], batch_first=True
+        )
+    
+    # 处理目标相关字段
+    if batch[0]['target'] is not None:
+        data['target'] = pad_sequence([b['target'] for b in batch], batch_first=True)
+        data['target_mask'] = pad_sequence(
+            [b['target_mask'] for b in batch], batch_first=True, padding_value=False
+        )
+    
+    # 处理掩码字段
+    mask_fields = ['x_valid_mask', 'lane_valid_mask']
+    for key in mask_fields:
+        if key in batch[0]:
             data[key] = pad_sequence(
                 [b[key] for b in batch], batch_first=True, padding_value=False
             )
-
+    
+    # 计算关键有效掩码
+    if 'x_valid_mask' in data:
         data['x_key_valid_mask'] = data['x_valid_mask'].any(-1)
+    if 'lane_valid_mask' in data:
         data['lane_key_valid_mask'] = data['lane_valid_mask'].any(-1)
-
-        data['scenario_id'] = [b['scenario_id'] for b in batch]
-        data['track_id'] = [b['track_id'] for b in batch]
-
-        data['origin'] = torch.cat([b['origin'] for b in batch], dim=0)
-        data['theta'] = torch.cat([b['theta'] for b in batch])
-        data['timestamp'] = torch.cat([b['timestamp'] for b in batch])
-        
-        if batch[0]['target'] is not None:
-            data['intent'] = pad_sequence([b['driving_intent'] for b in batch], batch_first=True)
-        if 'agent_indices' in batch[0]:
-            data['agent_indices'] = [b['agent_indices'] for b in batch]
-        seq_data.append(data)
-    return seq_data
+    
+    # 处理非张量字段
+    data['scenario_id'] = [b['scenario_id'] for b in batch]
+    data['track_id'] = [b['track_id'] for b in batch]
+    data['city'] = [b['city'] for b in batch]
+    
+    # 合并张量字段
+    data['origin'] = torch.cat([b['origin'] for b in batch], dim=0)
+    data['theta'] = torch.cat([b['theta'] for b in batch])
+    data['timestamp'] = torch.cat([b['timestamp'] for b in batch])
+    
+    # 处理驾驶意图
+    if batch[0]['target'] is not None and 'driving_intent' in batch[0]:
+        data['intent'] = pad_sequence([b['driving_intent'] for b in batch], batch_first=True)
+    
+    return data
