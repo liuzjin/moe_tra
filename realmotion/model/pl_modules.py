@@ -906,8 +906,13 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             # c) 辅助损失初始化为0，因为此模式下没有
             aux_loss = torch.tensor(0.0, device=gt_segment.device)
 
+            pred_vel = data['target'][:, :, 1:] - data['target'][:, :, :-1]
+            pred_accel = pred_vel[:, :, 1:] - pred_vel[:, :, :-1]
+            # 惩罚加速度的L2范数
+            kinematic_loss = torch.mean(pred_accel**2)
+
             # d) 总损失
-            total_loss = regression_loss + gating_loss + others_reg_loss
+            total_loss = regression_loss + gating_loss + others_reg_loss + 0.2 * kinematic_loss
 
         else:
             # ================================================================
@@ -969,28 +974,26 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             # 假设模型输出是您之前的格式 out['y_hat']
             predictions = out['y_hat']['predictions']
             # cross_entropy 需要 logits, 确保 'probs' 字段是 logits
-            intent = out['y_hat']['intent'] 
-            gt_action = data['intent'][:, 0, 0]
+            intent = out['y_hat']['intent'][:,:,tag] 
+            gt_action = data['intent'][:, 0, tag]
 
-            # a) 门控损失 (分类)
-            # gating_loss = (intent == gt_action).float().mean()
-            gating_loss = torch.tensor(0.0, device=intent.device)
+            
+           
             # b) 回归损失 ("赢家通吃")
-            #    找到离真值最近的预测模态
-            gt_expanded = gt_segment.unsqueeze(1)
-            l2_dist_per_mode = torch.norm(predictions[..., :2] - gt_expanded, p=2, dim=-1).sum(dim=-1)
-            _, best_mode_indices = torch.min(l2_dist_per_mode, dim=-1)
-
-            #    只用最好的那个模态来计算损失
-            best_predictions = torch.gather(
-                predictions, 1, 
-                best_mode_indices.view(-1, 1, 1, 1).expand(-1, 1, predictions.size(2), predictions.size(3))
+            all_log_probs = out['y_hat']['probs'] # (B, num_experts) - 需要模型返回这个
+            _, top1_indices = torch.max(all_log_probs, dim=-1) # (B,)
+            
+            top1_predictions = torch.gather(
+                predictions, 1,
+                top1_indices.view(-1, 1, 1, 1).expand(-1, 1, predictions.size(2), predictions.size(3))
             ).squeeze(1)
-            
-            regression_loss = F.smooth_l1_loss(best_predictions, gt_segment)
-            
-            # c) 辅助损失初始化为0，因为此模式下没有
-            aux_loss = torch.tensor(0.0, device=gt_segment.device)
+            top_intent = torch.gather(
+                intent, 1,
+                top1_indices.view(-1, 1)
+            ).squeeze()
+            # a) 门控损失 (分类) 
+            gating_loss = (top_intent == gt_action).float().mean()
+            regression_loss = F.smooth_l1_loss(top1_predictions, gt_segment)
 
             # d) 总损失
             total_loss = regression_loss + gating_loss + others_reg_loss
@@ -1003,11 +1006,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             predictions = out['y_hat']['predictions']
             logits = out['y_hat']['logits']
             probs = F.softmax(logits, dim=-1)
-            aux_loss = out['y_hat']['aux_loss']
-            
-            # a) 门控损失初始化为0，因为此模式下没有
-            gating_loss = torch.tensor(0.0, device=gt_segment.device)
-
+            gating_loss = out['y_hat']['aux_loss']
             
             gt_expanded = gt_segment.unsqueeze(1).expand_as(predictions)
             
@@ -1019,14 +1018,13 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             regression_loss = weighted_regression_error.mean()
             
             # c) 总损失
-            total_loss = regression_loss + (0.01 * aux_loss) + others_reg_loss
+            total_loss = regression_loss + (0.01 * gating_loss) + others_reg_loss
 
         # --- 3. 构建统一的日志字典 ---
         loss_dict = {
             f'{tag}_total_loss': total_loss.item(),
             f'{tag}_regression_loss': regression_loss.item(),
             f'{tag}_ating_loss': gating_loss.item(),
-            f'{tag}_aux_loss': aux_loss.item(),
             f'{tag}_others_reg_loss': others_reg_loss.item(),
         }
         
@@ -1086,6 +1084,7 @@ class Reg_moe_LightningModule(RegressionLightningModule):
             beams = sorted_beams[:beam_size]
             step_pre = {}
             step_pre['predictions'] = torch.stack([pre[:, 0, -self.n_step:] for _, pre, _, _ in beams ], dim=1)
+            step_pre['probs'] = torch.stack([prob for prob, _, _, _ in beams ], dim=1)
             if self.intent_label:
                 step_pre['intent'] = torch.stack([inten for _ , _, _, inten in beams ], dim=1)
             step_out['y_hat'] = step_pre
