@@ -186,7 +186,7 @@ class QueryBasedMoeDecoder(nn.Module):
         # --- 1. 可学习的意图查询向量 ---
         # 这是新架构的核心。每个向量将学会代表一种特定的驾驶意图。
         # (num_experts, dim)
-        self.intention_queries = nn.Parameter(torch.randn(self.num_experts, self.embed_dim))
+        self.intention_queries = nn.Parameter(torch.randn(60//future_steps,  self.num_experts, self.embed_dim))
 
         # --- 2. 交叉注意力层 ---
         # 这个层将使用意图查询(Query)来从上下文(Key, Value)中提取信息。
@@ -234,7 +234,7 @@ class QueryBasedMoeDecoder(nn.Module):
         # --- 核心步骤 1: 使用意图查询进行交叉注意力 ---
         
         # 将意图查询从 (num_experts, D) 扩展到 (B, num_experts, D) 以匹配批次大小
-        expert_features = self.intention_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        expert_features = self.intention_queries.unsqueeze(0).expand(batch_size, -1, -1, -1)
         
         # Q: 意图查询, K/V: 上下文
         # expert_features 的形状为 (B, num_experts, D)
