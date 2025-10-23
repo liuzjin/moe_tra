@@ -464,16 +464,27 @@ class MoeLightningModule(BaseLightningModule):
                 others_reg_loss = F.smooth_l1_loss(
                     y_hat_others[others_reg_mask], y_others[others_reg_mask]
                 )
+        aux_loss = torch.tensor(0.0, device=gt_traj.device)
+        if not self.intent_label:
+            # (B, K, S, N)
+            segment_probs_per_mode = F.softmax(out['y_hat']['segment_logits_per_mode'], dim=-1)
+            # 对 K 和 B 维度取平均，得到每个分段S对每个专家N的使用频率
+            # (S, N)
+            avg_usage = torch.mean(segment_probs_per_mode, dim=[0, 1])
+            # 鼓励使用率的平方和最小，即鼓励均匀分布
+            aux_loss = torch.mean(avg_usage**2) * self.num_experts
 
         # --- 4. 计算总损失 ---
         # 权重 g_weight_mode, g_weight_segment, o_weight 是需要调整的超参数
         g_weight_mode = 1.0
         g_weight_segment = 0.5
         o_weight = 1.0 # 其他智能体的损失权重
+        aux_weight = 1.0
         
         total_loss = (regression_loss + 
                     g_weight_mode * mode_gating_loss + 
                     g_weight_segment * segment_gating_loss +
+                    aux_weight * aux_loss +
                     o_weight * others_reg_loss)
         
         # --- 5. 构建日志字典 ---

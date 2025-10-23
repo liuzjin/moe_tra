@@ -242,7 +242,7 @@ class QueryBasedMoeDecoder(nn.Module):
             for _ in range(self.num_experts)
         ])
 
-    def forward(self, context, training= True, key_padding_mask=None):
+    def forward(self, context, training= True, key_padding_mask=None, gt_intent_sequence=None):
         batch_size = context.shape[0]
         
         # --- 步骤 1: 生成时序分段特征 (和之前一样) ---
@@ -277,46 +277,75 @@ class QueryBasedMoeDecoder(nn.Module):
         )
         
         # --- 步骤 5: 路由与预测 K 条轨迹 ---
-        
-        # (B, S, D) -> (B*S, D)
-        features_flat = segment_features.reshape(-1, self.embed_dim)
-        
-        # (B, K, S, N) -> (B, K, S)
-        expert_indices_per_mode = torch.argmax(segment_logits_per_mode, dim=-1)
+        features_flat = segment_features.reshape(-1, self.embed_dim) # (B*S, D)
         
         all_modal_trajs = []
         for k in range(self.num_modes):
-            # 获取当前模态 k 的专家选择路径
-            # expert_indices shape: (B, S) -> (B*S,)
-            expert_indices = expert_indices_per_mode[:, k, :].reshape(-1)
+            # 获取当前模态 k 的分段logits: (B, S, N)
+            segment_logits = segment_logits_per_mode[:, k, :, :]
             
-            segment_predictions = torch.zeros(
-                batch_size * self.num_segments, self.future_steps * 2, device=context.device
-            )
+            # (B, S, N) -> (B*S, N)
+            logits_flat = segment_logits.reshape(-1, self.num_experts)
 
-            for i in range(self.num_experts):
-                mask = (expert_indices == i)
-                if mask.any():
-                    features_for_expert = features_flat[mask]
-                    expert_output = self.experts[i](features_for_expert)
-                    segment_predictions.masked_scatter_(mask.unsqueeze(-1), expert_output)
+            # --- 根据 intent_label 标志选择路由策略 ---
+            if self.intent_label:
+                # --- 策略A: Top-1 硬路由 (适用于意图监督) ---
+                expert_indices = None
+                if training and gt_intent_sequence is not None:
+                    # 训练时使用真值意图强制路由
+                    expert_indices = gt_intent_sequence.reshape(-1)
+                else:
+                    # 推理时使用模型自己的Top-1预测
+                    expert_indices = torch.argmax(logits_flat, dim=-1)
+
+                segment_predictions = torch.zeros(
+                    batch_size * self.num_segments, self.future_steps * 2, device=context.device
+                )
+                for i in range(self.num_experts):
+                    mask = (expert_indices == i)
+                    if mask.any():
+                        features_for_expert = features_flat[mask]
+                        expert_output = self.experts[i](features_for_expert)
+                        segment_predictions.masked_scatter_(mask.unsqueeze(-1), expert_output)
             
-            # 拼接成一条完整的轨迹
+            else:
+                # --- 策略B: Top-k 软路由 (无监督模式) ---
+                probs_flat = F.softmax(logits_flat, dim=-1)
+                top_k_probs, top_k_indices = torch.topk(probs_flat, self.top_k, dim=-1)
+                top_k_probs = F.normalize(top_k_probs, p=1, dim=-1) # (B*S, top_k)
+
+                # segment_predictions = torch.zeros(
+                #     batch_size * self.num_segments, self.future_steps * 2, device=context.device
+                # )
+                temp_predictions = torch.zeros(
+                batch_size * self.num_segments, self.top_k, self.future_steps, 2, device=context.device
+                )
+                for i in range(self.num_experts):
+                    expert_mask = (top_k_indices == i)
+                    row_indices, col_indices = expert_mask.nonzero(as_tuple=True)
+                    if row_indices.numel() > 0:
+                        features_for_expert = features_flat[row_indices]
+                        expert_output = self.experts[i](features_for_expert)
+                        # gates_for_expert = top_k_probs[row_indices, col_indices].unsqueeze(1)
+                        # segment_predictions.index_add_(0, row_indices, expert_output * gates_for_expert)
+                        temp_predictions[row_indices, col_indices] = expert_output
+                weighted_predictions = top_k_probs.unsqueeze(-1).unsqueeze(-1) * temp_predictions
+                # (B*S, top_k, steps*2) -> (B*S, steps*2)
+                segment_predictions = torch.sum(weighted_predictions, dim=1)
+            # --- 拼接成一条完整的轨迹 (两种策略通用) ---
             final_traj = segment_predictions.view(
                 batch_size, self.num_segments, self.future_steps, 2
-            ).reshape(batch_size, self.future_steps*self.num_segments, 2)
+            ).reshape(batch_size, -1, 2)
             all_modal_trajs.append(final_traj)
 
-        # (K, B, T, 2) -> (B, K, T, 2)
+        # --- 准备输出 (与之前相同) ---
         final_predictions = torch.stack(all_modal_trajs, dim=1)
-
-        # --- 准备输出 ---
+        mode_probs = F.softmax(mode_logits, dim=-1)
         output = {
-            "predictions": final_predictions,   # (B, K, T, 2) - 多模态轨迹
-            "pi": mode_probs,                # (B, K) - 每个模态的概率
-            "logits": mode_logits,              # (B, K)
-            # 返回分段logits用于计算意图分类损失
-            "segment_logits_per_mode": segment_logits_per_mode # (B, K, S, N)
+            "predictions": final_predictions,
+            "probs": mode_probs,
+            "logits": mode_logits,
+            "segment_logits_per_mode": segment_logits_per_mode
         }
         
         return output

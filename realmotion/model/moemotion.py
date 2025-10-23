@@ -37,6 +37,7 @@ class MoeMotion(nn.Module):
             4, embed_dim // 4, drop_path_rate=drop_path
         )
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
+        self.intent_label = intent_label
 
         self.pos_embed = nn.Sequential(
             nn.Linear(4, embed_dim),
@@ -160,7 +161,8 @@ class MoeMotion(nn.Module):
         x_encoder = self.norm(x_encoder)
 
         if self.moe:
-            y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask)
+            gt_intent_sequence=data['intent'][:,0] if mode and self.intent_label else  None
+            y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask, gt_intent_sequence=gt_intent_sequence)
         else:
             x_agent = x_encoder[:, 0]
             y_hat = self.decoder(x_agent)
