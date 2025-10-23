@@ -190,8 +190,6 @@ class QueryBasedMoeDecoder(nn.Module):
         # 这是新架构的核心。每个向量将学会代表一种特定的驾驶意图。
         # --- 1. 时序分段查询 (不变) ---
         self.segment_queries = nn.Parameter(torch.randn(1, self.num_segments, self.embed_dim))
-
-        # --- 2. K个模态查询 (新增) ---
         self.mode_queries = nn.Parameter(torch.randn(1, self.num_modes, self.embed_dim))
 
         # --- 2. 交叉注意力层 ---

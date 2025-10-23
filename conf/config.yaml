@@ -20,7 +20,7 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 1
+gpus: 3
 batch_size: 48
 epochs: 80
 checkpoint: 
@@ -56,13 +56,13 @@ trainer:
   max_epochs: ${epochs}
   accelerator: gpu
   devices: ${gpus}
-  strategy: ddp_find_unused_parameters_false
+  strategy: ddp_find_unused_parameters_true
   gradient_clip_val: 5
   gradient_clip_algorithm: norm
   sync_batchnorm: true
   default_root_dir: ${output_dir}
   fast_dev_run: 0
-  num_sanity_val_steps: 1
+  num_sanity_val_steps: 0
   detect_anomaly: False
 
 
