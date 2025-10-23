@@ -72,91 +72,135 @@ class MLPExpert(nn.Module):
         
         return predicted_trajectory
 
-class MoeDecoder(nn.Module):
+class SimpleSegmentalMoeDecoder(nn.Module):
     def __init__(self, 
                  embed_dim: int, 
-                 future_steps: int, 
-                 num_experts: int, 
-                 top_k: int,
-                 intent_label: bool = True) -> None: # <<< 核心改动 1: 增加 intent_label 参数
+                 future_steps: int,
+                 future_len: int = 60,
+                 num_experts: int = 9, 
+                 num_modes: int = 6, # K
+                 top_k: int = 2,
+                 intent_label: bool = True):
         super().__init__()
         self.embed_dim = embed_dim
-        self.future_steps = future_steps
+        self.steps_per_segment = future_steps
         self.num_experts = num_experts
+        self.num_modes = num_modes # K
+        self.num_segments = future_len // future_steps
         self.top_k = top_k
-        self.intent_label = intent_label # 保存训练模式
-        
-        # --- 模块定义 (保持不变) ---
-        self.multimodal_feature_generator = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * num_experts),
-            nn.LayerNorm(embed_dim * num_experts)
-        )
-        self.gating_network = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim // 2),
+        self.intent_label = intent_label
+        self.total_future_steps = self.num_segments * self.steps_per_segment
+
+        # --- 1. 全局模态概率头 (MLP-based) ---
+        # 输入全局场景编码(D)，输出K个模态的logits
+        self.mode_prob_network = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
             nn.ReLU(),
-            nn.Linear(embed_dim // 2, num_experts)
+            nn.Linear(embed_dim, num_modes)
         )
+
+        # --- 2. 分段门控网络 (MLP-based) ---
+        # 输入全局场景编码(D)，一次性生成所有K个模态、所有S个分段的专家logits
+        self.segment_gating_network = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.LayerNorm(embed_dim * 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim * 2, num_modes * self.num_segments * self.num_experts)
+        )
+
+        # --- 3. 专家网络列表 (保持不变) ---
+        # 专家依然是简单的MLP，但它们的输入现在需要变一下
+        # 我们需要为每个分段生成一个独特的特征
+        self.segment_feature_generator = nn.Sequential(
+            nn.Linear(embed_dim, self.num_segments * self.embed_dim),
+            nn.LayerNorm(self.num_segments * self.embed_dim)
+        )
+
         self.experts = nn.ModuleList([
-            MLPExpert(embed_dim, future_steps)
+            MLPExpert(self.embed_dim, self.steps_per_segment)
             for _ in range(self.num_experts)
         ])
 
-    def forward(self, encoder_out: torch.Tensor, training: bool, key_padding_mask=None) -> Dict:
-        # 假设输入来自编码器，我们只取第一个[CLS] token的特征
-        x = encoder_out[:, 0].unsqueeze(1) # 保持 (B, 1, D) 的形状
-        x_squeezed = x.squeeze(1)
+    def forward(self, 
+                encoder_out: torch.Tensor, 
+                training: bool = True, 
+                **kwargs) -> Dict:
         
-        expert_features = self.multimodal_feature_generator(x_squeezed).view(-1, self.num_experts, self.embed_dim)
+        batch_size = encoder_out.shape[0]
         
-        # --- 计算门控logits (保持不变) ---
-        logits = self.gating_network(x_squeezed) # (B, num_experts)
+        # --- 步骤 1: 提取全局场景编码 ---
+        # 假设我们使用编码器输出的第一个 token ([CLS] token)
+        # scene_context shape: (B, D)
+        scene_context = encoder_out[:, 0]
         
-        if training:
-            predictions = []
-            for i in range(self.num_experts):
-                current_expert_feature = expert_features[:, i, :]
-                pred = self.experts[i](current_expert_feature)
-                predictions.append(pred)
-            all_predictions = torch.stack(predictions, dim=1)
-            
-            # --- 核心改动 3: 根据 intent_label 准备输出字典 ---
-            output = {
-                "predictions": all_predictions,
-                "logits": logits,  # 返回原始logits, 兼容两种损失函数
-                "mode": expert_features
-            }
-            
-            # 如果是无标签模式 (intent_label=False), 则计算并添加 aux_loss
-            if not self.intent_label:
-                probs = F.softmax(logits, dim=-1)
-                # 计算负载均衡损失
-                mean_probs = torch.mean(probs, dim=0)
-                aux_loss = self.num_experts * torch.sum(mean_probs * mean_probs)
-                output["aux_loss"] = aux_loss
-                
-            return output
-        else:
-            # 简化推理返回，直接返回字典
-            probs = F.softmax(logits, dim=-1) # 推理时使用probs
-            top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
-            batch_size = x.shape[0]
-            top_k_predictions = torch.zeros(batch_size, self.top_k, self.future_steps, 2, device=x.device)
-            expert_features = self.multimodal_feature_generator(x_squeezed).view(-1, self.num_experts, self.embed_dim)
+        # --- 步骤 2: 计算 K 个模态的全局概率 ---
+        # (B, D) -> (B, K)
+        mode_logits = self.mode_prob_network(scene_context)
+        mode_probs = F.softmax(mode_logits, dim=-1)
 
-            # 这里的循环为了保持与您原始代码的逻辑一致性。
-            # 推荐未来优化为torch.gather。
-            for i in range(batch_size):
-                for j in range(self.top_k):
-                    expert_idx = top_k_indices[i, j]
-                    feature = expert_features[i, expert_idx, :]
-                    top_k_predictions[i, j] = self.experts[expert_idx](feature)
-                    
-            return {
-                "predictions": top_k_predictions,
-                "probs": top_k_probs,
-                "top_k_indices": top_k_indices,
-                "mode": expert_features
-            }
+        # --- 步骤 3: 生成所有分段的专家选择序列 ---
+        # (B, D) -> (B, K*S*N) -> (B, K, S, N)
+        segment_logits_per_mode = self.segment_gating_network(scene_context).view(
+            batch_size, self.num_modes, self.num_segments, self.num_experts
+        )
+        
+        # --- 步骤 4: 为专家生成分段特征 ---
+        # (B, D) -> (B, S*D) -> (B, S, D)
+        segment_features = self.segment_feature_generator(scene_context).view(
+            batch_size, self.num_segments, self.embed_dim
+        )
+        # (B, S, D) -> (B*S, D)
+        features_flat = segment_features.reshape(-1, self.embed_dim)
+
+        # --- 步骤 5: (统一的) Top-k 软路由与预测 K 条轨迹 ---
+        all_modal_trajs = []
+        for k in range(self.num_modes):
+            # 获取当前模态 k 的分段logits: (B, S, N)
+            segment_logits = segment_logits_per_mode[:, k, :, :]
+            # (B, S, N) -> (B*S, N)
+            logits_flat = segment_logits.reshape(-1, self.num_experts)
+            
+            # --- 始终执行 Top-k 软路由 ---
+            probs_flat = F.softmax(logits_flat, dim=-1)
+            top_k_probs, top_k_indices = torch.topk(probs_flat, self.top_k, dim=-1)
+            top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
+
+            # 临时张量用于存储 top-k 个专家的原始预测
+            temp_predictions = torch.zeros(
+                batch_size * self.num_segments, self.top_k, self.steps_per_segment, 2, device=encoder_out.device
+            )
+            
+            for i in range(self.num_experts):
+                expert_mask = (top_k_indices == i)
+                row_indices, col_indices = expert_mask.nonzero(as_tuple=True)
+
+                if row_indices.numel() > 0:
+                    features_for_expert = features_flat[row_indices]
+                    expert_output = self.experts[i](features_for_expert).view(-1, self.steps_per_segment, 2)
+                    temp_predictions[row_indices, col_indices] = expert_output
+            
+            # 使用 top-k 概率进行加权求和
+            weighted_predictions = top_k_probs.unsqueeze(-1).unsqueeze(-1) * temp_predictions
+            segment_predictions_flat = torch.sum(weighted_predictions, dim=1)
+
+            # --- 拼接成一条完整的轨迹 ---
+            final_traj = segment_predictions_flat.view(
+                batch_size, self.num_segments, self.steps_per_segment, 2
+            ).reshape(batch_size, self.total_future_steps, 2)
+            all_modal_trajs.append(final_traj)
+
+        # --- 步骤 6: 准备输出 ---
+        final_predictions = torch.stack(all_modal_trajs, dim=1)
+        
+        output = {
+            "predictions": final_predictions,
+            "probs": mode_probs,
+            "logits": mode_logits,
+            "segment_logits_per_mode": segment_logits_per_mode
+        }
+        
+        return output
 
 class QueryBasedMoeDecoder(nn.Module):
     def __init__(self, 
@@ -242,7 +286,7 @@ class QueryBasedMoeDecoder(nn.Module):
             for _ in range(self.num_experts)
         ])
 
-    def forward(self, context, training= True, key_padding_mask=None, gt_intent_sequence=None):
+    def forward(self, context, training= True, key_padding_mask=None):
         batch_size = context.shape[0]
         
         # --- 步骤 1: 生成时序分段特征 (和之前一样) ---
@@ -287,65 +331,54 @@ class QueryBasedMoeDecoder(nn.Module):
             # (B, S, N) -> (B*S, N)
             logits_flat = segment_logits.reshape(-1, self.num_experts)
 
-            # --- 根据 intent_label 标志选择路由策略 ---
-            if self.intent_label:
-                # --- 策略A: Top-1 硬路由 (适用于意图监督) ---
-                expert_indices = None
-                if training and gt_intent_sequence is not None:
-                    # 训练时使用真值意图强制路由
-                    expert_indices = gt_intent_sequence.reshape(-1)
-                else:
-                    # 推理时使用模型自己的Top-1预测
-                    expert_indices = torch.argmax(logits_flat, dim=-1)
+            # --- 始终执行 Top-k 软路由 ---
+            probs_flat = F.softmax(logits_flat, dim=-1)
+            # (B*S, top_k)
+            top_k_probs, top_k_indices = torch.topk(probs_flat, self.top_k, dim=-1)
+            # 归一化权重
+            top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
 
-                segment_predictions = torch.zeros(
-                    batch_size * self.num_segments, self.future_steps * 2, device=context.device
-                )
-                for i in range(self.num_experts):
-                    mask = (expert_indices == i)
-                    if mask.any():
-                        features_for_expert = features_flat[mask]
-                        expert_output = self.experts[i](features_for_expert)
-                        segment_predictions.masked_scatter_(mask.unsqueeze(-1), expert_output)
-            
-            else:
-                # --- 策略B: Top-k 软路由 (无监督模式) ---
-                probs_flat = F.softmax(logits_flat, dim=-1)
-                top_k_probs, top_k_indices = torch.topk(probs_flat, self.top_k, dim=-1)
-                top_k_probs = F.normalize(top_k_probs, p=1, dim=-1) # (B*S, top_k)
-
-                # segment_predictions = torch.zeros(
-                #     batch_size * self.num_segments, self.future_steps * 2, device=context.device
-                # )
-                temp_predictions = torch.zeros(
+            # 临时张量用于存储 top-k 个专家的原始预测
+            # (B*S, top_k, steps, 2)
+            temp_predictions = torch.zeros(
                 batch_size * self.num_segments, self.top_k, self.future_steps, 2, device=context.device
-                )
-                for i in range(self.num_experts):
-                    expert_mask = (top_k_indices == i)
-                    row_indices, col_indices = expert_mask.nonzero(as_tuple=True)
-                    if row_indices.numel() > 0:
-                        features_for_expert = features_flat[row_indices]
-                        expert_output = self.experts[i](features_for_expert)
-                        # gates_for_expert = top_k_probs[row_indices, col_indices].unsqueeze(1)
-                        # segment_predictions.index_add_(0, row_indices, expert_output * gates_for_expert)
-                        temp_predictions[row_indices, col_indices] = expert_output
-                weighted_predictions = top_k_probs.unsqueeze(-1).unsqueeze(-1) * temp_predictions
-                # (B*S, top_k, steps*2) -> (B*S, steps*2)
-                segment_predictions = torch.sum(weighted_predictions, dim=1)
-            # --- 拼接成一条完整的轨迹 (两种策略通用) ---
-            final_traj = segment_predictions.view(
+            )
+            
+            for i in range(self.num_experts):
+                # 找到哪些分段的 top-k 选择中包含了当前专家 i
+                expert_mask = (top_k_indices == i) # (B*S, top_k)
+                row_indices, col_indices = expert_mask.nonzero(as_tuple=True)
+
+                if row_indices.numel() > 0:
+                    features_for_expert = features_flat[row_indices]
+                    # 专家输出 (num_non_zero, steps*2) -> (num_non_zero, steps, 2)
+                    expert_output = self.experts[i](features_for_expert).view(-1, self.future_steps, 2)
+                    
+                    # 将预测结果填充到临时张量的正确位置
+                    temp_predictions[row_indices, col_indices] = expert_output
+            
+            # 使用 top-k 概率进行加权求和
+            # (B*S, top_k, 1, 1) * (B*S, top_k, steps, 2) -> (B*S, top_k, steps, 2)
+            weighted_predictions = top_k_probs.unsqueeze(-1).unsqueeze(-1) * temp_predictions
+            # (B*S, top_k, steps, 2) -> (B*S, steps, 2)
+            segment_predictions_flat = torch.sum(weighted_predictions, dim=1)
+
+            # --- 拼接成一条完整的轨迹 ---
+            final_traj = segment_predictions_flat.view(
                 batch_size, self.num_segments, self.future_steps, 2
             ).reshape(batch_size, -1, 2)
             all_modal_trajs.append(final_traj)
 
-        # --- 准备输出 (与之前相同) ---
+        # --- 步骤 6: 准备输出 ---
         final_predictions = torch.stack(all_modal_trajs, dim=1)
         mode_probs = F.softmax(mode_logits, dim=-1)
+        
         output = {
-            "predictions": final_predictions,
-            "pi": mode_probs,
-            "logits": mode_logits,
-            "segment_logits_per_mode": segment_logits_per_mode
+            "predictions": final_predictions,   # (B, K, T, 2)
+            "probs": mode_probs,                # (B, K)
+            "logits": mode_logits,              # (B, K)
+            # 始终返回分段logits，由损失函数决定如何使用
+            "segment_logits_per_mode": segment_logits_per_mode # (B, K, S, N)
         }
         
         return output

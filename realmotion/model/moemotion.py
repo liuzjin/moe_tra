@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import MoeDecoder, MultimodalDecoder, QueryBasedMoeDecoder
+from .layers.multimodal_decoder import  MultimodalDecoder, QueryBasedMoeDecoder, SimpleSegmentalMoeDecoder
 from .layers.mtr_decoder import TransformerDecoder
 from .layers.transformer_blocks import Block, InteractionModule
 
@@ -76,7 +76,7 @@ class MoeMotion(nn.Module):
                     top_k=top_k,
                     intent_label=intent_label)
             else:
-                self.decoder = MoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label)
+                self.decoder = SimpleSegmentalMoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label)
         else:
             self.decoder = MultimodalDecoder(embed_dim, future_steps)
         self.dense_predictor = nn.Sequential(
