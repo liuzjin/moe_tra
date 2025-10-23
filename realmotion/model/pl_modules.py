@@ -478,8 +478,9 @@ class MoeLightningModule(BaseLightningModule):
         # 权重 g_weight_mode, g_weight_segment, o_weight 是需要调整的超参数
         g_weight_mode = 1.0
         g_weight_segment = 0.5
-        o_weight = 1.0 # 其他智能体的损失权重
         aux_weight = 1.0
+        o_weight = 1.0 # 其他智能体的损失权重
+        
         
         total_loss = (regression_loss + 
                     g_weight_mode * mode_gating_loss + 
