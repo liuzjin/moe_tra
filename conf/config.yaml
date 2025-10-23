@@ -46,7 +46,7 @@ callbacks:
     logging_interval: epoch
   - _target_: pytorch_lightning.callbacks.EarlyStopping
     monitor: minADE6
-    patience: 30
+    patience: 15
     mode: min
     verbose: true
     min_delta: 0.001
