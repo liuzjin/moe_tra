@@ -195,7 +195,7 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         
         output = {
             "predictions": final_predictions,
-            "probs": mode_probs,
+            "pi": mode_probs,
             "logits": mode_logits,
             "segment_logits_per_mode": segment_logits_per_mode
         }
