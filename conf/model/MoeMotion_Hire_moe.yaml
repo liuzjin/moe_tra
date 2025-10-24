@@ -1,7 +1,7 @@
-tag: MoeMotion_moe
+tag: MoeMotion_Hire_moe
 
 pl_module:
-  _target_: realmotion.model.pl_modules.MoeLightningModule
+  _target_: realmotion.model.pl_modules.Hierarchical_Moe
   total_epochs: ${epochs}
   modes: 6
   k: ${top_k}
@@ -22,7 +22,7 @@ pl_module:
     qkv_bias: False
     drop_path: 0.2
     moe: True
-    moe_type: "mlp"
+    moe_type: "hire_moe"
     query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1

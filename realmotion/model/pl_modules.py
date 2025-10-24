@@ -607,4 +607,60 @@ class MoeLightningModule(BaseLightningModule):
             all_outs.append(out)
         self.submission_handler.format_data(data[-1], all_outs[-1]['y_hat'], all_outs[-1]['pi'])
 
+
+class Hierarchical_Moe(MoeLightningModule):
+
+    def cal_loss(self, out, data):
+        gt_traj = data['target'][:, 0]
+        y_others = data['target'][:, 1:]
+        others_reg_mask = data['target_mask'][:, 1:]
+        gt_macro_intent = data.get('intent')[:,0,0]  # (B,)
+        
+        # --- 1. 回归损失 ---
+        # 训练时 out['predictions'] 的形状是 (B, 1, T, 2)
+        predictions = out['y_hat']['predictions'].squeeze(1) # (B, T, 2)
+        y_hat_others = out.get('y_hat_others')
+        regression_loss = F.smooth_l1_loss(predictions, gt_traj)
+        others_reg_loss = F.smooth_l1_loss(
+                    y_hat_others[others_reg_mask], y_others[others_reg_mask]
+                )
+        
+        # --- 2. 顶层门控分类损失 ---
+        macro_logits = out['y_hat']['logits'] # (B, M)
+        gating_loss = F.cross_entropy(macro_logits, gt_macro_intent)
+        
+        # --- 总损失 ---
+        total_loss = regression_loss + others_reg_loss + 1.0 * gating_loss
+        
+        loss_dict = {
+            'total_loss': total_loss.item(),
+            'regression_loss': regression_loss.item(),
+            'gating_loss': gating_loss.item(),
+            'others_reg_loss': others_reg_loss.item(),
+        }
+        return total_loss, loss_dict
+
+    def validation_step(self, data, batch_idx):
+        self.eval()
+        out = self(data, False)
     
+        mode_logits = out['y_hat']['logits']      # (B, K)
+        _, top1_indices = torch.max(mode_logits, dim=-1)
+
+                
+        out = {
+            'y_hat': out['y_hat']['predictions'],
+            'pi': out['y_hat']['pi'],
+            'y_hat_others': out['y_hat_others'],
+            'intent': top1_indices,
+            'intent_target': data['intent'][:, 0],
+        }
+        metrics = self.metrics(out, data['target'][:, 0])
+        self.log_dict(
+            metrics,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=1,
+            sync_dist=True,
+        )

@@ -382,3 +382,150 @@ class QueryBasedMoeDecoder(nn.Module):
         }
         
         return output
+
+class IndependentSubMoE(nn.Module):
+    def __init__(self, embed_dim: int, future_steps: int, num_sub_experts: int, top_k_micro: int):
+        super().__init__()
+        self.num_sub_experts = num_sub_experts
+        self.top_k_micro = top_k_micro
+        self.future_steps = future_steps
+
+        self.gating_network = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, self.num_sub_experts)
+        )
+        self.experts = nn.ModuleList([
+            MLPExpert(embed_dim, future_steps) for _ in range(num_sub_experts)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (B, D)
+        
+        # 1. 内部微观门控
+        sub_logits = self.gating_network(x) # (B, N_sub)
+        sub_probs = F.softmax(sub_logits, dim=-1)
+        
+        # 2. 选择内部Top-k专家
+        top_k_probs, top_k_indices = torch.topk(sub_probs, self.top_k_micro, dim=-1)
+        top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
+
+        # 3. Top-k专家加权预测
+        temp_predictions = torch.zeros(
+            x.shape[0], self.top_k_micro, self.future_steps, 2, device=x.device
+        )
+        
+        for i in range(self.num_sub_experts):
+            mask = (top_k_indices == i)
+            row_indices, col_indices = mask.nonzero(as_tuple=True)
+            if row_indices.numel() > 0:
+                features_for_expert = x[row_indices]
+                expert_output = self.experts[i](features_for_expert).view(-1, self.future_steps, 2)
+                temp_predictions[row_indices, col_indices] = expert_output
+        
+        weighted_predictions = top_k_probs.unsqueeze(-1).unsqueeze(-1) * temp_predictions
+        final_trajectory = torch.sum(weighted_predictions, dim=1) # (B, T, 2)
+        
+        return final_trajectory
+
+class HierarchicalGatingDecoder(nn.Module):
+    def __init__(self, 
+                 embed_dim: int, 
+                 future_steps: int,
+                 intents: int = 9, 
+                 num_experts: int = 4,
+                 top_k: int = 2,
+                 modes: int = 6):  # K_macro, 推理时输出的模态数
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.intents = intents
+        self.modes = modes # K
+        self.future_steps = future_steps
+        
+        # --- 1. 顶层宏观意图门控 ---
+        self.top_level_gate = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.LayerNorm(embed_dim * 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim * 2, self.intents)
+        )
+
+        # --- 2. 独立的、专家不共享的子MoE系统 ---
+        self.sub_systems = nn.ModuleList([
+            IndependentSubMoE(
+                    embed_dim=embed_dim,
+                    future_steps=future_steps,
+                    num_sub_experts=num_experts,
+                    top_k_micro=top_k
+                ) for i in range(intents)])
+
+
+    def forward(self, 
+                encoder_out: torch.Tensor, 
+                training: bool = True,
+                gt_intent_sequence = None,
+                **kwargs) -> Dict:
+        # gt_macro_intent shape: (B,)
+        
+        scene_context = encoder_out[:, 0]
+        batch_size = scene_context.shape[0]
+
+        # --- 步骤 1: 计算顶层宏观意图的Logits ---
+        macro_logits = self.top_level_gate(scene_context) # (B, M)
+
+        if training:
+            # --- 训练逻辑 ---
+            # 我们只训练真值意图对应的那个子系统，以提供最强的监督信号
+            gt_intent_sequence = gt_intent_sequence.squeeze()
+            if gt_intent_sequence is None:
+                raise ValueError("gt_macro_intent must be provided during training.")
+            
+            final_predictions = torch.zeros(batch_size, self.future_steps, 2, device=scene_context.device)
+            
+            for i in range(self.intents):
+                # 找到宏观意图为 i 的样本
+                mask = (gt_intent_sequence == i)
+                if mask.any():
+                    # 只让第 i 个子系统对这些样本进行预测
+                    sub_system_output = self.sub_systems[i](scene_context[mask])
+                    # 将结果放回最终的预测张量
+                    final_predictions[mask] = sub_system_output
+
+            # 训练时，predictions 只有一个模态，即真值模态的预测结果
+            # 这使得回归损失的计算非常直接
+            output = {
+                "predictions": final_predictions.unsqueeze(1), # (B, 1, T, 2)
+                "logits": macro_logits # (B, M) - 用于计算顶层门控损失
+            }
+        else:
+            # --- 推理逻辑 ---
+            # 我们选择Top-K个最可能的宏观意图，并让对应的子系统生成轨迹
+            macro_probs = F.softmax(macro_logits, dim=-1)
+            top_k_probs, top_k_indices = torch.topk(macro_probs, self.modes, dim=-1)
+            
+            all_modal_trajs = torch.zeros(
+                batch_size, self.modes, self.future_steps, 2, device=scene_context.device
+            )
+
+            # 遍历 K 个 top 模态
+            for k in range(self.modes):
+                # 当前第k个最可能的意图索引 (B,)
+                intent_indices = top_k_indices[:, k]
+                
+                # 遍历所有可能的 M 个意图
+                for i in range(self.intents):
+                    mask = (intent_indices == i)
+                    if mask.any():
+                        # 让第 i 个子系统对这些样本进行预测
+                        sub_system_output = self.sub_systems[i](scene_context[mask])
+                        # 将结果放入第 k 个模态的对应位置
+                        all_modal_trajs[mask, k, :, :] = sub_system_output
+            
+            output = {
+                "predictions": all_modal_trajs, # (B, K, T, 2)
+                "pi": top_k_probs,           # (B, K)
+                "logits": macro_logits          # (B, M) - 完整的logits
+            }
+            
+        return output

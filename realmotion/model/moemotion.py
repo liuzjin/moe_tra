@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  MultimodalDecoder, QueryBasedMoeDecoder, SimpleSegmentalMoeDecoder
+from .layers.multimodal_decoder import  MultimodalDecoder, QueryBasedMoeDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
 from .layers.mtr_decoder import TransformerDecoder
 from .layers.transformer_blocks import Block, InteractionModule
 
@@ -23,7 +23,7 @@ class MoeMotion(nn.Module):
         future_steps=60,
         future_len=60,
         moe=True,
-        use_transformer_decoder=False,
+        moe_type="cross",
         query_cross_layers=2,
         query_self_atten=True,
         query_self_layers=1,
@@ -32,7 +32,7 @@ class MoeMotion(nn.Module):
         intent_label=True
     ) -> None:
         super().__init__()
-        self.use_transformer_decoder = use_transformer_decoder
+        
         self.hist_embed = AgentEmbeddingLayer(
             4, embed_dim // 4, drop_path_rate=drop_path
         )
@@ -62,7 +62,7 @@ class MoeMotion(nn.Module):
         self.lane_type_embed = nn.Parameter(torch.Tensor(1, 1, embed_dim))
         self.moe = moe
         if moe:
-            if use_transformer_decoder:
+            if moe_type == "cross":
                 self.decoder = QueryBasedMoeDecoder(
                     dim=embed_dim, 
                     mlp_ratio = mlp_ratio,
@@ -75,8 +75,10 @@ class MoeMotion(nn.Module):
                     num_experts=num_experts, 
                     top_k=top_k,
                     intent_label=intent_label)
-            else:
+            elif moe_type == "mlp":
                 self.decoder = SimpleSegmentalMoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label)
+            elif moe_type == "hire_moe":
+                self.decoder = HierarchicalGatingDecoder(embed_dim, future_steps, intents=num_experts, top_k=top_k)
         else:
             self.decoder = MultimodalDecoder(embed_dim, future_steps)
         self.dense_predictor = nn.Sequential(
