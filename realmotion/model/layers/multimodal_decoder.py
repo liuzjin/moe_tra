@@ -158,10 +158,10 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         # --- 步骤 4: 为专家生成分段特征 ---
         # (B, D) -> (B, S*D) -> (B, S, D)
         segment_features = self.segment_feature_generator(scene_context).view(
-            batch_size, self.num_segments, self.embed_dim
+            batch_size, self.num_segments, self.mlp_dim
         )
         # (B, S, D) -> (B*S, D)
-        features_flat = segment_features.reshape(-1, self.embed_dim)
+        features_flat = segment_features.reshape(-1, self.mlp_dim)
 
         # --- 步骤 5: (统一的) Top-k 软路由与预测 K 条轨迹 ---
         all_modal_trajs = []
