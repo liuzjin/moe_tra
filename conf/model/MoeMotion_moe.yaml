@@ -14,6 +14,7 @@ pl_module:
   model:
     _target_: realmotion.model.moemotion.MoeMotion
     embed_dim: 128
+    mlp_dim: 128
     future_steps: ${n_step}
     future_len: ${future_len}
     encoder_depth: 4

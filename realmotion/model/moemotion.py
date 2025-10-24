@@ -15,6 +15,7 @@ class MoeMotion(nn.Module):
     def __init__(
         self,
         embed_dim=128,
+        mlp_dim=128,
         encoder_depth=4,
         num_heads=8,
         mlp_ratio=4.0,
@@ -77,7 +78,7 @@ class MoeMotion(nn.Module):
                     top_k=top_k,
                     intent_label=intent_label)
             elif moe_type == "mlp":
-                self.decoder = SimpleSegmentalMoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label, drop=mlp_drop)
+                self.decoder = SimpleSegmentalMoeDecoder(embed_dim,mlp_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label, drop=mlp_drop)
             elif moe_type == "hire_moe":
                 self.decoder = HierarchicalGatingDecoder(embed_dim, future_steps, intents=num_experts, top_k=top_k)
         else:
