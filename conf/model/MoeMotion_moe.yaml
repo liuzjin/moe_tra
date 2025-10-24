@@ -21,6 +21,7 @@ pl_module:
     mlp_ratio: 4.0
     qkv_bias: False
     drop_path: 0.2
+    mlp_drop: 0.2
     moe: True
     moe_type: "mlp"
     query_cross_layers: 2

@@ -646,8 +646,6 @@ class Hierarchical_Moe(MoeLightningModule):
     
         mode_logits = out['y_hat']['logits']      # (B, K)
         _, top1_indices = torch.max(mode_logits, dim=-1)
-
-                
         out = {
             'y_hat': out['y_hat']['predictions'],
             'pi': out['y_hat']['pi'],

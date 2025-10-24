@@ -49,7 +49,7 @@ class MultimodalDecoder(nn.Module):
                  "mode": x }
     
 class MLPExpert(nn.Module):
-    def __init__(self, d_model: int, prediction_horizon: int):
+    def __init__(self, d_model: int, prediction_horizon: int, drop: int):
         super().__init__()
         self.prediction_horizon = prediction_horizon
         hidden_dim = d_model * 2 
@@ -57,8 +57,10 @@ class MLPExpert(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(d_model, 256),
             nn.ReLU(),
+            nn.Dropout(drop),
             nn.Linear(256, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(drop),
             nn.Linear(hidden_dim, prediction_horizon * 2) 
         )
 
@@ -80,7 +82,8 @@ class SimpleSegmentalMoeDecoder(nn.Module):
                  num_experts: int = 9, 
                  num_modes: int = 6, # K
                  top_k: int = 2,
-                 intent_label: bool = True):
+                 intent_label: bool = True,
+                 drop: int = 0.2):
         super().__init__()
         self.embed_dim = embed_dim
         self.steps_per_segment = future_steps
@@ -97,7 +100,8 @@ class SimpleSegmentalMoeDecoder(nn.Module):
             nn.Linear(embed_dim, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.ReLU(),
-            nn.Linear(embed_dim, num_modes)
+            nn.Dropout(drop),
+            nn.Linear(embed_dim, num_modes),
         )
 
         # --- 2. 分段门控网络 (MLP-based) ---
@@ -106,7 +110,9 @@ class SimpleSegmentalMoeDecoder(nn.Module):
             nn.Linear(embed_dim, embed_dim * 2),
             nn.LayerNorm(embed_dim * 2),
             nn.ReLU(),
-            nn.Linear(embed_dim * 2, num_modes * self.num_segments * self.num_experts)
+            nn.Dropout(drop),
+            nn.Linear(embed_dim * 2, num_modes * self.num_segments * self.num_experts),
+            
         )
 
         # --- 3. 专家网络列表 (保持不变) ---
@@ -114,11 +120,13 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         # 我们需要为每个分段生成一个独特的特征
         self.segment_feature_generator = nn.Sequential(
             nn.Linear(embed_dim, self.num_segments * self.embed_dim),
-            nn.LayerNorm(self.num_segments * self.embed_dim)
+            nn.LayerNorm(self.num_segments * self.embed_dim),
+            nn.ReLU(),
+            nn.Dropout(drop) # <<< 4. 在激活函数后添加Dropout
         )
 
         self.experts = nn.ModuleList([
-            MLPExpert(self.embed_dim, self.steps_per_segment)
+            MLPExpert(self.embed_dim, self.steps_per_segment, drop)
             for _ in range(self.num_experts)
         ])
 

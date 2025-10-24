@@ -20,6 +20,7 @@ class MoeMotion(nn.Module):
         mlp_ratio=4.0,
         qkv_bias=False,
         drop_path=0.2,
+        mlp_drop=0.2,
         future_steps=60,
         future_len=60,
         moe=True,
@@ -76,7 +77,7 @@ class MoeMotion(nn.Module):
                     top_k=top_k,
                     intent_label=intent_label)
             elif moe_type == "mlp":
-                self.decoder = SimpleSegmentalMoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label)
+                self.decoder = SimpleSegmentalMoeDecoder(embed_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label, drop=mlp_drop)
             elif moe_type == "hire_moe":
                 self.decoder = HierarchicalGatingDecoder(embed_dim, future_steps, intents=num_experts, top_k=top_k)
         else:
