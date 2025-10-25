@@ -667,3 +667,62 @@ class Hierarchical_Moe(MoeLightningModule):
             batch_size=1,
             sync_dist=True,
         )
+
+class Cross_moe_mlp_Module(BaseLightningModule):
+    def __init__(self,
+                 num_grad_frame=3,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.metrics = MetricCollection(
+            {
+                'minADE1': minADE(k=1),
+                'minADE6': minADE(k=6),
+                'minFDE1': minFDE(k=1),
+                'minFDE6': minFDE(k=6),
+                'MR': MR(),
+                'b-minFDE6': brier_minFDE(k=6),
+            }
+        )
+    def forward(self, data, mode):
+        return self.model(data, mode)
+    def training_step(self, data, batch_idx):
+        out = self(data, True)
+        out['pi'] = out['y_hat']['pi']
+        out['y_hat'] = out['y_hat']['predictions']
+        loss, loss_dict = self.cal_loss(out, data)
+
+        for k, v in loss_dict.items():
+            self.log(
+                f'train/{k}',
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
+
+        return loss
+
+    def validation_step(self, data, batch_idx):
+        out = self(data, False)
+        out['pi'] = out['y_hat']['pi']
+        out['y_hat'] = out['y_hat']['predictions']
+        _, loss_dict = self.cal_loss(out, data)
+        metrics = self.metrics(out, data['target'][:, 0])
+
+        self.log(
+            'val/reg_loss',
+            loss_dict['reg_loss'],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+        )
+        self.log_dict(
+            metrics,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=1,
+            sync_dist=True,
+        )

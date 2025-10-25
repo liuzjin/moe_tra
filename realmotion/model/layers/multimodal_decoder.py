@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple
 
-from realmotion.model.layers.transformer_blocks import Block, InterBlock
+from realmotion.model.layers.transformer_blocks import Block, DecoderLayer, InterBlock
 
 class MultimodalDecoder(nn.Module):
     """A naive MLP-based multimodal decoder"""
@@ -538,4 +538,83 @@ class HierarchicalGatingDecoder(nn.Module):
                 "logits": macro_logits          # (B, M) - 完整的logits
             }
             
+        return output
+
+
+class MoE_QueryDecoder(nn.Module):
+    def __init__(self,
+                 dim=128,
+                 num_layers=3, # 解码器层数
+                 num_heads=8,
+                 mlp_ratio=4.0,
+                 future_len=60,
+                 num_modes=6,
+                 use_moe_ffn: bool = True, # 控制是否在FFN中使用MoE
+                 num_experts=8,
+                 top_k=2,
+                 **kwargs):
+        super().__init__()
+        self.num_modes = num_modes
+        self.total_future_steps = future_len
+
+        # --- 1. K个可学习的多模态查询向量 ---
+        self.mode_queries = nn.Parameter(torch.randn(1, self.num_modes, dim))
+
+        # --- 2. 堆叠的解码器层 ---
+        self.decoder_layers = nn.ModuleList([
+            DecoderLayer(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                use_moe_ffn=use_moe_ffn,
+                num_experts=num_experts,
+                top_k=top_k,
+                **kwargs
+            ) for _ in range(num_layers)
+        ])
+        
+        # --- 3. 最终的预测头 ---
+        # a) 轨迹解码头 (MLP)
+        self.loc_head = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.ReLU(),
+            nn.Linear(dim * 2, self.total_future_steps * 2)
+        )
+        
+        # b) 概率解码头 (MLP)
+        self.prob_head = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 1)
+        )
+
+    def forward(self, context, training=True, key_padding_mask=None, **kwargs):
+        batch_size = context.shape[0]
+
+        # --- 1. 准备初始查询 ---
+        # (1, K, D) -> (B, K, D)
+        queries = self.mode_queries.expand(batch_size, -1, -1)
+        
+        # --- 2. 通过多层解码器进行特征提纯 ---
+        for layer in self.decoder_layers:
+            queries = layer(queries, context, context_key_padding_mask=key_padding_mask)
+        # 经过处理后，queries 的形状仍然是 (B, K, D)
+        # 现在的 queries 已经融合了场景信息，并且通过自注意力变得多样化
+        
+        # --- 3. 解码最终结果 ---
+        # a) 轨迹
+        # (B, K, D) -> (B, K, T*2) -> (B, K, T, 2)
+        final_predictions = self.loc_head(queries).view(
+            batch_size, self.num_modes, self.total_future_steps, 2
+        )
+        
+        # b) 概率
+        # (B, K, D) -> (B, K, 1) -> (B, K)
+        mode_logits = self.prob_head(queries).squeeze(-1)
+        
+        output = {
+            "predictions": final_predictions, # (B, K, T, 2)
+            "pi": mode_logits             # (B, K)
+        }
+        
         return output

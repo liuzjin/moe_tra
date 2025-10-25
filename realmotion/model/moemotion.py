@@ -2,11 +2,11 @@ from typing import List
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 
 from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  MultimodalDecoder, QueryBasedMoeDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
+from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
 from .layers.mtr_decoder import TransformerDecoder
 from .layers.transformer_blocks import Block, InteractionModule
 
@@ -31,7 +31,9 @@ class MoeMotion(nn.Module):
         query_self_layers=1,
         num_experts=9,
         top_k=2,
-        intent_label=True
+        intent_label=True,
+        attn_moe_mlp=False,
+        modes=6
     ) -> None:
         super().__init__()
         
@@ -81,6 +83,17 @@ class MoeMotion(nn.Module):
                 self.decoder = SimpleSegmentalMoeDecoder(embed_dim,mlp_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label, drop=mlp_drop)
             elif moe_type == "hire_moe":
                 self.decoder = HierarchicalGatingDecoder(embed_dim, future_steps, intents=num_experts, top_k=top_k)
+            elif moe_type == "cross_moe_mlp":
+                self.decoder = MoE_QueryDecoder(
+                    dim=embed_dim,
+                    num_layers=query_cross_layers, # 解码器层数
+                    mlp_ratio=mlp_ratio,
+                    future_len=future_len,
+                    num_modes=modes,
+                    use_moe_ffn=attn_moe_mlp, # 控制是否在FFN中使用MoE
+                    num_experts=num_experts,
+                    top_k=top_k,
+                )
         else:
             self.decoder = MultimodalDecoder(embed_dim, future_steps)
         self.dense_predictor = nn.Sequential(
