@@ -14,4 +14,4 @@ pl_module:
     split_points:
     n_step: ${n_step}
     radius: 150.0
-    map_radius: 0.0
+    map_radius: 150.0
