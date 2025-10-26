@@ -607,7 +607,7 @@ class MoE_QueryDecoder(nn.Module):
         # --- 3. 解码最终结果 ---
         # a) 轨迹
         # (B, K, D) -> (B, K, T*2) -> (B, K, T, 2)
-        predictions = self.loc_head(queries).view(
+        delta_predictions  = self.loc_head(queries).view(
             batch_size, self.all_modes, self.future_steps, 2
         )
         mode_logits_segmented = self.prob_head(queries).squeeze(-1) # (B, K)
@@ -621,11 +621,41 @@ class MoE_QueryDecoder(nn.Module):
         # (B, K_original, num_segments) -> (B, K_original)
         final_mode_logits = torch.sum(mode_logits_reshaped, dim=2)
 
-        # 2. 拼接轨迹
-        # (B, K, T_segment, 2) -> (B, K_original, num_segments, T_segment, 2)
-        predictions_reshaped = predictions.view(batch_size, self.num_modes, self.segment, self.future_steps, 2)
-        # (B, K_original, num_segments, T_segment, 2) -> (B, K_original, T_total, 2)
-        final_predictions = predictions_reshaped.flatten(2, 3)
+        delta_segments = delta_predictions.view(
+            batch_size, self.num_modes, self.segment, self.future_steps, 2
+        )
+
+        # 初始化一个列表来存储计算出的绝对坐标分段
+        absolute_segments = []
+        
+        # 初始化每个模态的起点，相对于车辆当前位置，起点为(0,0)
+        # 形状为 (B, num_modes, 1, 2) 以便进行广播相加
+        last_endpoint = torch.zeros(
+            batch_size, self.num_modes, 1, 2, 
+            device=delta_segments.device, 
+            dtype=delta_segments.dtype
+        )
+
+        # 循环遍历每一个分段
+        for i in range(self.segment):
+            # 获取当前分段的位移预测
+            # shape: (B, num_modes, T_seg, 2)
+            current_delta_segment = delta_segments[:, :, i, :, :]
+            
+            # 将上一段的终点加到当前段的每一个位移点上，得到当前段的绝对坐标
+            current_absolute_segment = current_delta_segment + last_endpoint
+            
+            # 将计算好的绝对坐标分段存入列表
+            absolute_segments.append(current_absolute_segment)
+            
+            # 更新下一轮循环所需要的“上一段的终点”
+            # 取当前绝对坐标分段的最后一个点作为新的终点
+            # shape: (B, num_modes, 2) -> unsqueeze -> (B, num_modes, 1, 2)
+            last_endpoint = current_absolute_segment[:, :, -1, :].unsqueeze(2)
+
+        # 将列表中所有的绝对坐标分段在时间维度上拼接起来
+        # List of (B, K, T_seg, 2) -> (B, K, T_total, 2)
+        final_predictions = torch.cat(absolute_segments, dim=2)
 
         output = {
             "predictions": final_predictions, # (B, K, T, 2)
