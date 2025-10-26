@@ -321,7 +321,7 @@ class DecoderLayer(nn.Module):
         queries = self.norm1(queries + cross_attn_output)
         
         # 2. 通过MoE层进行高容量的特征变换
-        moe_output = self.ffn1(queries)
+        moe_output = self.moe(queries)
         # Add & Norm
         queries = self.norm2(queries + moe_output)
         

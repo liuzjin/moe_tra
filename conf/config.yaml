@@ -1,12 +1,12 @@
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_moe
-
 defaults:
   - _self_
   - datamodule: av2_moe
-  - model: MoeMotion_cross_moe_mlp
+  - model: MoeMotion_moe
+
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_cross_moe_mlp
 
 # defaults:
 #   - _self_

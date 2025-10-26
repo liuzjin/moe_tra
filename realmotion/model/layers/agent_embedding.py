@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from natten import NeighborhoodAttention1D
 from timm.models.layers import DropPath
 
+from realmotion.model.layers.transformer_blocks import MoE
+
 
 class AgentEmbeddingLayer(nn.Module):
     def __init__(
@@ -179,12 +181,13 @@ class NATLayer(nn.Module):
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
-        self.mlp = Mlp(
-            in_features=dim,
-            hidden_features=int(dim * mlp_ratio),
-            act_layer=act_layer,
-            drop=drop,
-        )
+        self.mlp = MoE(dim, num_experts=10, top_k=2, mlp_ratio=mlp_ratio)
+        # self.mlp = Mlp(
+        #     in_features=dim,
+        #     hidden_features=int(dim * mlp_ratio),
+        #     act_layer=act_layer,
+        #     drop=drop,
+        # )
 
     def forward(self, x):
         shortcut = x
