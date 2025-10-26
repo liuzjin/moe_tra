@@ -296,7 +296,8 @@ class DecoderLayer(nn.Module):
         
         # --- 模块2: 专家混合网络 (MoE) ---
         # 注意：这里我们使用 MoE 来代替标准的 FFN
-        self.moe = MoE(dim, num_experts=num_experts, top_k=top_k, mlp_ratio=mlp_ratio)
+        # self.moe = MoE(dim, num_experts=num_experts, top_k=top_k, mlp_ratio=mlp_ratio)
+        self.ffn1 = MLP(dim, mlp_ratio=mlp_ratio)
         self.norm2 = nn.LayerNorm(dim)
         
         # --- 模块3: 自注意力 ---
@@ -304,7 +305,7 @@ class DecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         
         # --- 模块4: 最终的前馈网络 (FFN) ---
-        self.ffn = MLP(dim, mlp_ratio=mlp_ratio)
+        self.ffn2 = MLP(dim, mlp_ratio=mlp_ratio)
         self.norm4 = nn.LayerNorm(dim)
 
     def forward(self, queries, context, context_key_padding_mask: Optional[torch.Tensor] = None):
@@ -320,7 +321,7 @@ class DecoderLayer(nn.Module):
         queries = self.norm1(queries + cross_attn_output)
         
         # 2. 通过MoE层进行高容量的特征变换
-        moe_output = self.moe(queries)
+        moe_output = self.ffn1(queries)
         # Add & Norm
         queries = self.norm2(queries + moe_output)
         
@@ -332,7 +333,7 @@ class DecoderLayer(nn.Module):
         queries = self.norm3(queries + self_attn_output)
         
         # 4. 最后通过一个标准的FFN进行特征提炼
-        ffn_output = self.ffn(queries)
+        ffn_output = self.ffn2(queries)
         # Add & Norm
         queries = self.norm4(queries + ffn_output)
         
