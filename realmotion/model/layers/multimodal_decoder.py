@@ -548,6 +548,7 @@ class MoE_QueryDecoder(nn.Module):
                  num_heads=8,
                  mlp_ratio=4.0,
                  future_len=60,
+                 future_steps=60,
                  num_modes=6,
                  use_moe_ffn: bool = True, # 控制是否在FFN中使用MoE
                  num_experts=8,
@@ -555,10 +556,13 @@ class MoE_QueryDecoder(nn.Module):
                  **kwargs):
         super().__init__()
         self.num_modes = num_modes
+        self.segment = future_len // future_steps
+        self.all_modes = num_modes * self.segment
+        self.future_steps = future_steps
         self.total_future_steps = future_len
 
         # --- 1. K个可学习的多模态查询向量 ---
-        self.mode_queries = nn.Parameter(torch.randn(1, self.num_modes, dim))
+        self.mode_queries = nn.Parameter(torch.randn(1, self.all_modes, dim))
 
         # --- 2. 堆叠的解码器层 ---
         self.decoder_layers = nn.ModuleList([
@@ -578,7 +582,7 @@ class MoE_QueryDecoder(nn.Module):
         self.loc_head = nn.Sequential(
             nn.Linear(dim, dim * 2),
             nn.ReLU(),
-            nn.Linear(dim * 2, self.total_future_steps * 2)
+            nn.Linear(dim * 2, self.future_steps * 2)
         )
         
         # b) 概率解码头 (MLP)
@@ -604,17 +608,29 @@ class MoE_QueryDecoder(nn.Module):
         # --- 3. 解码最终结果 ---
         # a) 轨迹
         # (B, K, D) -> (B, K, T*2) -> (B, K, T, 2)
-        final_predictions = self.loc_head(queries).view(
-            batch_size, self.num_modes, self.total_future_steps, 2
+        predictions = self.loc_head(queries).view(
+            batch_size, self.all_modes, self.future_steps, 2
         )
-        
-        # b) 概率
-        # (B, K, D) -> (B, K, 1) -> (B, K)
-        mode_logits = self.prob_head(queries).squeeze(-1)
-        
+        mode_logits_segmented = self.prob_head(queries).squeeze(-1) # (B, K)
+
+        # --- 概率和轨迹的重组 ---
+    
+
+        # 1. 对logits进行求和
+        # (B, K) -> (B, K_original, num_segments)
+        mode_logits_reshaped = mode_logits_segmented.view(batch_size, self.num_modes, self.segment)
+        # (B, K_original, num_segments) -> (B, K_original)
+        final_mode_logits = torch.sum(mode_logits_reshaped, dim=2)
+
+        # 2. 拼接轨迹
+        # (B, K, T_segment, 2) -> (B, K_original, num_segments, T_segment, 2)
+        predictions_reshaped = predictions.view(batch_size, self.num_modes, self.segment, self.future_steps, 2)
+        # (B, K_original, num_segments, T_segment, 2) -> (B, K_original, T_total, 2)
+        final_predictions = predictions_reshaped.flatten(2, 3)
+
         output = {
             "predictions": final_predictions, # (B, K, T, 2)
-            "pi": mode_logits             # (B, K)
+            "pi": final_mode_logits             # (B, K)
         }
         
         return output

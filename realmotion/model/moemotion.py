@@ -89,6 +89,7 @@ class MoeMotion(nn.Module):
                     num_layers=query_cross_layers, # 解码器层数
                     mlp_ratio=mlp_ratio,
                     future_len=future_len,
+                    future_steps=future_steps,
                     num_modes=modes,
                     use_moe_ffn=attn_moe_mlp, # 控制是否在FFN中使用MoE
                     num_experts=num_experts,
