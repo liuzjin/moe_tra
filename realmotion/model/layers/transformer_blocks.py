@@ -234,130 +234,106 @@ class InterBlock(nn.Module):
         src = src + self.drop_path2(self.mlp(self.norm2(src)))
         return src
 
-class SparseMoE_MLP(nn.Module):
-    """
-    一个稀疏混合专家MLP层，专门用于替换Transformer块中的标准FFN。
-    """
-    def __init__(self, in_features: int, hidden_features: int, num_experts: int, top_k: int):
+class MLP(nn.Module):
+    def __init__(self, dim, mlp_ratio=4.0):
         super().__init__()
+        self.fc1 = nn.Linear(dim, int(dim * mlp_ratio))
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(int(dim * mlp_ratio), dim)
+
+    def forward(self, x):
+        return self.fc2(self.act(self.fc1(x)))
+
+# 高性能、向量化的专家混合 (MoE) 模块
+class MoE(nn.Module):
+    def __init__(self, dim, num_experts=8, top_k=2, mlp_ratio=4.0):
+        super().__init__()
+        self.dim = dim
         self.num_experts = num_experts
         self.top_k = top_k
-        self.in_features = in_features
-        self.hidden_features = hidden_features
+        
+        self.gate = nn.Linear(dim, num_experts)
+        self.experts = nn.ModuleList([MLP(dim, mlp_ratio) for _ in range(num_experts)])
 
-        # 1. 门控网络: 输入(D)，输出(N_experts)
-        self.gate = nn.Linear(in_features, num_experts)
-        
-        # 2. 专家列表: 每个专家都是一个标准的MLP/FFN
-        self.experts = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(in_features, hidden_features),
-                nn.GELU(), # 或者其他激活函数
-                nn.Linear(hidden_features, in_features)
-            ) for _ in range(num_experts)
-        ])
+    def forward(self, x: torch.Tensor):
+        B, N, D = x.shape
+        x_flat = x.reshape(-1, D)
+        num_tokens = x_flat.shape[0]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (Batch, SeqLen, Dim)
-        batch_size, seq_len, dim = x.shape
-        
-        # (B, N, D) -> (B*N, D)
-        x_flat = x.reshape(-1, dim)
-        
-        # --- 门控 ---
-        # (B*N, D) -> (B*N, N_experts)
-        logits = self.gate(x_flat)
-        probs = F.softmax(logits, dim=-1)
-        
-        # --- Top-k 路由 ---
-        # top_k_probs: (B*N, K), top_k_indices: (B*N, K)
-        top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
-        # 归一化权重
-        top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
+        gate_logits = self.gate(x_flat)
+        weights, indices = torch.topk(gate_logits, self.top_k, dim=-1)
+        weights = F.softmax(weights, dim=-1, dtype=torch.float).to(x.dtype)
 
-        # --- Top-k 专家加权 ---
-        # 初始化一个临时张量来存储k个专家的输出
-        # (B*N, K, D)
-        temp_expert_outputs = torch.zeros(
-            batch_size * seq_len, self.top_k, dim, device=x.device
-        )
+        y_flat = torch.zeros_like(x_flat)
+        flat_indices = indices.view(-1)
+        repeated_tokens = x_flat.repeat_interleave(self.top_k, dim=0)
 
         for i in range(self.num_experts):
-            # 找到哪些 token 的 top-k 选择中包含了当前专家 i
-            expert_mask = (top_k_indices == i)
-            row_indices, col_indices = expert_mask.nonzero(as_tuple=True)
+            mask = (flat_indices == i)
+            if mask.any():
+                expert_inputs = repeated_tokens[mask]
+                expert_outputs = self.experts[i](expert_inputs)
+                weights_for_expert = weights.view(-1)[mask].unsqueeze(1)
+                weighted_outputs = expert_outputs * weights_for_expert
+                original_positions = torch.arange(num_tokens, device=x.device).repeat_interleave(self.top_k)[mask]
+                y_flat.scatter_add_(0, original_positions.unsqueeze(1).expand(-1, D), weighted_outputs)
 
-            if row_indices.numel() > 0:
-                # 提取需要由专家 i 处理的 token
-                features_for_expert = x_flat[row_indices]
-                # 运行专家网络
-                expert_output = self.experts[i](features_for_expert)
-                # 将结果填充到临时张量的正确位置
-                temp_expert_outputs[row_indices, col_indices] = expert_output
-        
-        # 加权求和
-        # (B*N, K, 1) * (B*N, K, D) -> (B*N, K, D)
-        weighted_outputs = top_k_probs.unsqueeze(-1) * temp_expert_outputs
-        # (B*N, K, D) -> (B*N, D)
-        y_flat = torch.sum(weighted_outputs, dim=1)
-
-        # Reshape回原始形状
-        # (B*N, D) -> (B, N, D)
-        y = y_flat.reshape(batch_size, seq_len, dim)
-        
-        # (可选) 返回负载均衡损失，用于训练
-        # aux_loss = ... 
-        
-        return y
+        return y_flat.view(B, N, D)
 
 class DecoderLayer(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4.0, use_moe_ffn=False, num_experts=8, top_k=2, **kwargs):
+    def __init__(self,
+                 dim=128,
+                 num_heads=8,
+                 mlp_ratio=4.0,
+                 num_experts=8,
+                 top_k=2,
+                 **kwargs):
         super().__init__()
-        # --- 交叉注意力 ---
-        self.cross_attn_norm = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True, **kwargs)
-        self.cross_attn_dropout = nn.Dropout(0.1)
+        
+        # --- 模块1: 交叉注意力 ---
+        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm1 = nn.LayerNorm(dim)
+        
+        # --- 模块2: 专家混合网络 (MoE) ---
+        # 注意：这里我们使用 MoE 来代替标准的 FFN
+        self.moe = MoE(dim, num_experts=num_experts, top_k=top_k, mlp_ratio=mlp_ratio)
+        self.norm2 = nn.LayerNorm(dim)
+        
+        # --- 模块3: 自注意力 ---
+        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm3 = nn.LayerNorm(dim)
+        
+        # --- 模块4: 最终的前馈网络 (FFN) ---
+        self.ffn = MLP(dim, mlp_ratio=mlp_ratio)
+        self.norm4 = nn.LayerNorm(dim)
 
-        # --- 自注意力 ---
-        self.self_attn_norm = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True, **kwargs)
-        self.self_attn_dropout = nn.Dropout(0.1)
+    def forward(self, queries, context, context_key_padding_mask: Optional[torch.Tensor] = None):
+        # queries: (B, K, D) - 多模态查询
+        # context: (B, N, D) - 编码器输出的场景信息
 
-        # --- FFN / MoE-FFN ---
-        self.ffn_norm = nn.LayerNorm(dim)
-        if use_moe_ffn:
-            self.ffn = SparseMoE_MLP(
-                in_features=dim,
-                hidden_features=int(dim * mlp_ratio),
-                num_experts=num_experts,
-                top_k=top_k
-            )
-        else:
-            # 标准的FFN
-            self.ffn = nn.Sequential(
-                nn.Linear(dim, int(dim * mlp_ratio)),
-                nn.GELU(),
-                nn.Dropout(0.1),
-                nn.Linear(int(dim * mlp_ratio), dim)
-            )
-        self.ffn_dropout = nn.Dropout(0.1)
-
-    def forward(self, queries, context, context_key_padding_mask=None):
-        # 1. 交叉注意力
-        q = self.cross_attn_norm(queries)
-        attn_out, _ = self.cross_attn(
-            query=q, key=context, value=context, key_padding_mask=context_key_padding_mask
-        )
-        queries = queries + self.cross_attn_dropout(attn_out)
-
-        # 2. 自注意力
-        q = self.self_attn_norm(queries)
-        attn_out, _ = self.self_attn(query=q, key=q, value=q)
-        queries = queries + self.self_attn_dropout(attn_out)
-
-        # 3. FFN / MoE-FFN
-        x = self.ffn_norm(queries)
-        ffn_out = self.ffn(x)
-        queries = queries + self.ffn_dropout(ffn_out)
+        # 1. 首先进行交叉注意力，让queries吸收场景信息
+        cross_attn_output, _ = self.cross_attn(query=queries,
+                                               key=context,
+                                               value=context,
+                                               key_padding_mask=context_key_padding_mask)
+        # Add & Norm
+        queries = self.norm1(queries + cross_attn_output)
+        
+        # 2. 通过MoE层进行高容量的特征变换
+        moe_output = self.moe(queries)
+        # Add & Norm
+        queries = self.norm2(queries + moe_output)
+        
+        # 3. 然后进行自注意力，让不同模态的queries之间进行信息交互
+        self_attn_output, _ = self.self_attn(query=queries,
+                                             key=queries,
+                                             value=queries)
+        # Add & Norm
+        queries = self.norm3(queries + self_attn_output)
+        
+        # 4. 最后通过一个标准的FFN进行特征提炼
+        ffn_output = self.ffn(queries)
+        # Add & Norm
+        queries = self.norm4(queries + ffn_output)
         
         return queries

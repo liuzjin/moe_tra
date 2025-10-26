@@ -10,7 +10,7 @@ pl_module:
     future_len: ${future_len}
     encoder_depth: 4
     num_heads: 8
-    mlp_ratio: 4.0
+    mlp_ratio: 2.0
     qkv_bias: False
     drop_path: 0.2
     mlp_drop: 0.0

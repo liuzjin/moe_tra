@@ -546,7 +546,7 @@ class MoE_QueryDecoder(nn.Module):
                  dim=128,
                  num_layers=3, # 解码器层数
                  num_heads=8,
-                 mlp_ratio=4.0,
+                 mlp_ratio=2.0,
                  future_len=60,
                  future_steps=60,
                  num_modes=6,
@@ -570,7 +570,6 @@ class MoE_QueryDecoder(nn.Module):
                 dim=dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
-                use_moe_ffn=use_moe_ffn,
                 num_experts=num_experts,
                 top_k=top_k,
                 **kwargs
