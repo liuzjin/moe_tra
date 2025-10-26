@@ -171,7 +171,8 @@ class RealMotion_I(nn.Module):
         x_encoder = self.norm(x_encoder)
 
         x_agent = x_encoder[:, 0]
-        y_hat, pi, x_mode = self.decoder(x_agent)
+        pred = self.decoder(x_agent)
+        y_hat, pi, x_mode = pred['predictions'], pred['logits'], pred['mode']
         x_others = x_encoder[:, 1:N]
         y_hat_others = self.dense_predictor(x_others).view(B, x_others.size(1), -1, 2)
         
