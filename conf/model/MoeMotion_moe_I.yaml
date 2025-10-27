@@ -1,4 +1,4 @@
-tag: MoeMotion_moe
+tag: MoeMotion_moe_I
 
 pl_module:
   _target_: realmotion.model.pl_modules.BaseLightningModule
