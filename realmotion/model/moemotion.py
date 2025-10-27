@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 
-from .layers.agent_embedding import AgentEmbeddingLayer
+from .layers.agent_embedding import AgentEmbeddingLayer, HistoryCompressor
 from .layers.lane_embedding import LaneEmbeddingLayer
 from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
 from .layers.mtr_decoder import TransformerDecoder
@@ -22,6 +22,7 @@ class MoeMotion(nn.Module):
         qkv_bias=False,
         drop_path=0.2,
         mlp_drop=0.2,
+        history_len=50,
         future_steps=60,
         future_len=60,
         moe=True,
@@ -40,6 +41,11 @@ class MoeMotion(nn.Module):
         self.hist_embed = AgentEmbeddingLayer(
             4, embed_dim // 4, drop_path_rate=drop_path
         )
+        self.num_segments = history_len // 10
+        self.segment_pos_embed = nn.Parameter(
+            torch.randn(1, 1, self.num_segments, embed_dim)
+        )
+        self.hist_compress = HistoryCompressor(embed_dim, 10, 10)
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
         self.intent_label = intent_label
 
@@ -96,9 +102,9 @@ class MoeMotion(nn.Module):
                     top_k=top_k,
                 )
         else:
-            self.decoder = MultimodalDecoder(embed_dim, future_steps)
+            self.decoder = MultimodalDecoder(embed_dim, future_steps,self.num_segments)
         self.dense_predictor = nn.Sequential(
-            nn.Linear(embed_dim, 256), nn.ReLU(), nn.Linear(256, future_len * 2)
+            nn.Linear(embed_dim*self.num_segments, 256), nn.ReLU(), nn.Linear(256, future_len * 2)
         )
 
         self.initialize_weights()
@@ -143,11 +149,16 @@ class MoeMotion(nn.Module):
         actor_feat = self.hist_embed(
             hist_feat[hist_feat_key_valid].permute(0, 2, 1).contiguous()
         )
+        actor_feat = self.hist_compress(actor_feat)
+        segment = actor_feat.shape[-2]
+
         actor_feat_tmp = torch.zeros(
-            B * N, actor_feat.shape[-1], device=actor_feat.device
+            B * N, segment, actor_feat.shape[-1], device=actor_feat.device
         )
         actor_feat_tmp[hist_feat_key_valid] = actor_feat
-        actor_feat = actor_feat_tmp.view(B, N, actor_feat.shape[-1])
+        actor_feat = actor_feat_tmp.view(B, N, segment, actor_feat.shape[-1])
+        actor_feat = actor_feat + self.segment_pos_embed
+        actor_feat = actor_feat.reshape(B, -1, actor_feat.shape[-1])
 
         lane_valid_mask = data['lane_valid_mask']
         lane_normalized = data['lane_positions'] - data['lane_centers'].unsqueeze(-2)
@@ -158,20 +169,35 @@ class MoeMotion(nn.Module):
         lane_feat = self.lane_embed(lane_normalized.view(-1, L, D).contiguous())
         lane_feat = lane_feat.view(B, M, -1)
 
-        x_centers = torch.cat([data['x_centers'], data['lane_centers']], dim=1)
-        angles = torch.cat([data['x_angles'][:, :, -1], data['lane_angles']], dim=1)
+        x_centers_agents = data['x_centers'].unsqueeze(2).repeat(1, 1, segment, 1)  # [B, N, segment, 2]
+        x_angles_agents = data['x_angles'][:, :, -1].unsqueeze(2).repeat(1, 1, segment)  # [B, N, segment, 1]
+        x_centers = torch.cat([x_centers_agents.reshape(B, N*segment, -1), data['lane_centers']], dim=1)
+        angles_agents = x_angles_agents.reshape(B, N*segment)
+        angles = torch.cat([angles_agents, data['lane_angles']], dim=1)
+
         x_angles = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
         pos_feat = torch.cat([x_centers, x_angles], dim=-1)
         pos_embed = self.pos_embed(pos_feat)
-        actor_type_embed = self.actor_type_embed[data['x_attr'][..., 2].long()]
+
+        actor_type_indices = data['x_attr'][..., 2].long().unsqueeze(-1).repeat(1, 1, segment).view(B, N*segment)
+        actor_type_embed = self.actor_type_embed[actor_type_indices]
+
+
+        # x_centers = torch.cat([data['x_centers'], data['lane_centers']], dim=1)
+        # angles = torch.cat([data['x_angles'][:, :, -1], data['lane_angles']], dim=1)
+        # x_angles = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
+        # pos_feat = torch.cat([x_centers, x_angles], dim=-1)
+        # pos_embed = self.pos_embed(pos_feat)
+        # actor_type_embed = self.actor_type_embed[data['x_attr'][..., 2].long()]
        
         lane_type_embed = self.lane_type_embed.repeat(B, M, 1)
         actor_feat += actor_type_embed
         lane_feat += lane_type_embed
 
         x_encoder = torch.cat([actor_feat, lane_feat], dim=1)
+
         key_valid_mask = torch.cat(
-            [data['x_key_valid_mask'], data['lane_key_valid_mask']], dim=1
+            [data['x_key_valid_mask'].unsqueeze(-1).repeat(1, 1, segment).reshape(B, -1), data['lane_key_valid_mask']], dim=1
         )
         x_encoder = x_encoder + pos_embed
         for blk in self.blocks:
@@ -182,9 +208,11 @@ class MoeMotion(nn.Module):
             gt_intent_sequence=data['intent'][:,0] if mode and self.intent_label else  None
             y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask, gt_intent_sequence=gt_intent_sequence)
         else:
-            x_agent = x_encoder[:, 0]
+            x_agent = x_encoder[:, :segment]
             y_hat = self.decoder(x_agent)
-        x_others = x_encoder[:, 1:N]
+        x_others = x_encoder[:, segment:segment*(N), :]
+        x_others = x_others.reshape(B, N-1,segment, -1) 
+        x_others = x_others.reshape(B, N-1, -1)
         y_hat_others = self.dense_predictor(x_others).view(B, x_others.size(1), -1, 2)
         ret_dict = {
             'y_hat': y_hat,

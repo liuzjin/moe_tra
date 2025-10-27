@@ -86,7 +86,9 @@ class AgentEmbeddingLayer(nn.Module):
 
         out = self.fpn_conv(laterals[0])
 
-        return out[:, :, -1]
+        # return out[:, :, -1]
+        return out
+    
 
 
 class ConvTokenizer(nn.Module):
@@ -252,3 +254,31 @@ class NATBlock(nn.Module):
         if self.downsample is None:
             return x, x
         return self.downsample(x), x
+
+class HistoryCompressor(nn.Module):
+    """
+    使用一维卷积来压缩历史轨迹序列，提取“意图嵌入”。
+
+    输入形状: (B, N, T_history, D)
+    输出形状: (B, N, T_segments, D)
+    """
+    def __init__(self,
+                 feature_dim: int,
+                 kernel_size: int,
+                 stride: int):
+
+        super().__init__()
+        
+        self.conv1d = nn.Conv1d(
+            in_channels=feature_dim,
+            out_channels=feature_dim,
+            kernel_size=kernel_size,
+            stride=stride
+        )
+
+
+    def forward(self, history_features: torch.Tensor) -> torch.Tensor:
+        B, D, T = history_features.shape
+        compressed_x = self.conv1d(history_features)
+        final_output = compressed_x.permute(0, 2, 1)
+        return final_output

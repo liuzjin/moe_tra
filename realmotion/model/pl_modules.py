@@ -292,89 +292,15 @@ class StreamLightningModule(BaseLightningModule):
             memory_dict = out['memory_dict']
             all_outs.append(out)
         self.submission_handler.format_data(data[-1], all_outs[-1]['y_hat'], all_outs[-1]['pi'])
-def get_teacher_forcing_ratio(
-    epoch: int, 
-    total_epochs: int, 
-    schedule_type: str = 'linear', 
-    initial_ratio: float = 1.0, 
-    final_ratio: float = 0.0,
-    inverse_sigmoid_k: float = None
-) -> float:
-    
-    # --- 1. 线性衰减 (Linear Decay) ---
-    if schedule_type == 'linear':
-        if epoch >= total_epochs:
-            return final_ratio
-        # 确保 total_epochs > 0 以避免除零错误
-        if total_epochs <= 0:
-            return initial_ratio
-        
-        decay_rate = (initial_ratio - final_ratio) / total_epochs
-        current_ratio = initial_ratio - (epoch * decay_rate)
-        return max(final_ratio, current_ratio) # 确保不会低于最终值
-
-    # --- 2. 指数衰减 (Exponential Decay) ---
-    elif schedule_type == 'exponential':
-        if initial_ratio <= final_ratio:
-            return final_ratio
-        if total_epochs <= 0:
-            return initial_ratio
-
-        # decay_rate = (final / initial) ^ (1 / total_epochs)
-        decay_rate = (final_ratio / initial_ratio) ** (1.0 / total_epochs)
-        
-        current_ratio = initial_ratio * (decay_rate ** epoch)
-        return current_ratio
-
-    # --- 3. 逆Sigmoid衰减 (Inverse Sigmoid Decay) ---
-    elif schedule_type == 'inverse_sigmoid':
-        # 如果没有提供k值，使用一个合理的经验值
-        if inverse_sigmoid_k is None:
-            # k值越大，曲线越平缓，teacher forcing保持高位的时间越长
-            inverse_sigmoid_k = float(total_epochs / 10)
-            if inverse_sigmoid_k < 1.0:
-                 warnings.warn(f"Calculated k for inverse_sigmoid is {inverse_sigmoid_k:.2f} which is very small. Consider setting it manually.")
-                 inverse_sigmoid_k = 1.0
-
-        if inverse_sigmoid_k <= 0:
-             raise ValueError("k for inverse_sigmoid_decay must be positive.")
-
-        return inverse_sigmoid_k / (inverse_sigmoid_k + math.exp(epoch / inverse_sigmoid_k))
-
-    elif schedule_type == 'cosine':
-        if epoch >= total_epochs:
-            return final_ratio
-        if total_epochs <= 0:
-            return initial_ratio
-            
-        # 计算余弦曲线的部分
-        cosine_part = 0.5 * (1 + math.cos(math.pi * epoch / total_epochs))
-        
-        # 将曲线映射到 [initial_ratio, final_ratio] 的范围
-        current_ratio = final_ratio + (initial_ratio - final_ratio) * cosine_part
-        return current_ratio
-    # --- 4. 如果策略名无效，则报错 ---
-    else:
-        raise ValueError(
-            f"Unknown schedule_type: '{schedule_type}'. "
-            f"Please choose from 'linear', 'exponential', or 'inverse_sigmoid'."
-        )
 
 
-def nan_hook(module, input, output):
-    if isinstance(output, torch.Tensor) and torch.any(torch.isnan(output)):
-        print(f"NaN found in the output of layer: {module}")
-        # 在这里可以设置一个断点或者抛出异常来中断程序
-        # import pdb; pdb.set_trace()
 class MoeLightningModule(BaseLightningModule):
     def __init__(self,
                  total_epochs=100,
                  modes=6,
                  k=2,
                  n_step=10,
-                 logits_max=True,
                  history_frames=50,
-                 schedule_type='linear',
                  num_experts=9,
                  intent_label=True,
                  **kwargs):
@@ -383,17 +309,12 @@ class MoeLightningModule(BaseLightningModule):
         self.modes = modes
         self.k = k
         self.n_step = n_step
-        self.logits_max = logits_max
         self.history_frames = history_frames
         self.n = 60 // n_step
         self.initial_ss_ratio = 1.0 # 初始teacher forcing概率
         self.final_ss_ratio = 0.1   # 最终teacher forcing概率
-        self.schedule_type = schedule_type
         self.intent_label = intent_label
         self.num_experts = num_experts
-
-        for name, module in self.model.named_modules():
-            module.register_forward_hook(nan_hook)
     
     def forward(self, data, mode):
         return self.model(data, mode)

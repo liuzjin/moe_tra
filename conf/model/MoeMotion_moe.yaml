@@ -6,15 +6,14 @@ pl_module:
   modes: 6
   k: ${top_k}
   n_step: ${n_step}
-  logits_max: True
-  history_frames: 50
-  schedule_type: 'linear'
+  history_frames: ${history_len}
   num_experts: ${num_experts}
   intent_label: ${intent_label}
   model:
     _target_: realmotion.model.moemotion.MoeMotion
     embed_dim: 128
     mlp_dim: 128
+    history_len: ${history_len}
     future_steps: ${n_step}
     future_len: ${future_len}
     encoder_depth: 4
@@ -23,7 +22,7 @@ pl_module:
     qkv_bias: False
     drop_path: 0.2
     mlp_drop: 0.0
-    moe: True
+    moe: False
     moe_type: "mlp"
     query_cross_layers: 2
     query_self_atten: True

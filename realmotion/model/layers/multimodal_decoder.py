@@ -8,12 +8,18 @@ from realmotion.model.layers.transformer_blocks import Block, DecoderLayer, Inte
 class MultimodalDecoder(nn.Module):
     """A naive MLP-based multimodal decoder"""
 
-    def __init__(self, embed_dim, future_steps, return_prob=True) -> None:
+    def __init__(self, embed_dim, future_steps,num_segments=5, return_prob=True) -> None:
         super().__init__()
 
         self.embed_dim = embed_dim
         self.future_steps = future_steps
         self.return_prob = return_prob
+        self.aggregation_layer = nn.Sequential(
+            nn.Linear(num_segments * embed_dim, embed_dim * 2),
+            nn.LayerNorm(embed_dim * 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim * 2, embed_dim)
+        )
 
         self.multimodal_proj = nn.Linear(embed_dim, 6 * embed_dim)
 
@@ -34,7 +40,10 @@ class MultimodalDecoder(nn.Module):
             )
 
     def forward(self, x):
-        x = self.multimodal_proj(x).view(-1, 6, self.embed_dim)
+        B, T, D = x.shape
+        x_flat = x.view(B, -1) 
+        aggregated_x = self.aggregation_layer(x_flat) # 输出形状: (B, D), 例如 (48, 128)
+        x = self.multimodal_proj(aggregated_x).view(-1, 6, self.embed_dim)
         loc = self.loc(x).view(-1, 6, self.future_steps, 2)
         if self.return_prob:
             pi = self.pi(x).squeeze(-1)
