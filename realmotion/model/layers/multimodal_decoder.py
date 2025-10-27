@@ -54,7 +54,7 @@ class MultimodalDecoder(nn.Module):
         
         return {"predictions": loc, # (B, top_k, T, 2) -> Top-K的轨迹
                 "logits": pi, 
-                "probs": probs,
+                "pi": probs,
                  "mode": x }
     
 class MLPExpert(nn.Module):

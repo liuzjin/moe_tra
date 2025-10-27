@@ -33,8 +33,8 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 1
-batch_size: 24
+gpus: 3
+batch_size: 48
 epochs: 100
 checkpoint: 
 submit:

@@ -35,13 +35,12 @@ class BaseLightningModule(pl.LightningModule):
                 'minFDE6': minFDE(k=6),
                 'MR': MR(),
                 'b-minFDE6': brier_minFDE(k=6),
-                'IntentAcc': CustomAccuracy()
+                
             }
         )
 
-    def forward(self, data):
-        return self.model(data)
-
+    def forward(self, data, mode):
+        return self.model(data, mode)
     def cal_loss(self, out, data, tag=''):
         y_hat, pi, y_hat_others = out['y_hat'], out['pi'], out['y_hat_others']
         new_y_hat = out.get('new_y_hat', None)
@@ -82,7 +81,10 @@ class BaseLightningModule(pl.LightningModule):
     def training_step(self, data, batch_idx):
         if isinstance(data, list):
             data = data[-1]
-        out = self(data)
+        out = self(data, True)
+        
+        out['pi'] = out['y_hat']['logits']
+        out['y_hat'] = out['y_hat']['predictions']
         loss, loss_dict = self.cal_loss(out, data)
 
         for k, v in loss_dict.items():
@@ -100,7 +102,9 @@ class BaseLightningModule(pl.LightningModule):
     def validation_step(self, data, batch_idx):
         if isinstance(data, list):
             data = data[-1]
-        out = self(data)
+        out = self(data, False)
+        out['pi'] = out['y_hat']['logits']
+        out['y_hat'] = out['y_hat']['predictions']
         _, loss_dict = self.cal_loss(out, data)
         metrics = self.metrics(out, data['target'][:, 0])
 
@@ -315,6 +319,17 @@ class MoeLightningModule(BaseLightningModule):
         self.final_ss_ratio = 0.1   # 最终teacher forcing概率
         self.intent_label = intent_label
         self.num_experts = num_experts
+        self.metrics = MetricCollection(
+            {
+                'minADE1': minADE(k=1),
+                'minADE6': minADE(k=6),
+                'minFDE1': minFDE(k=1),
+                'minFDE6': minFDE(k=6),
+                'MR': MR(),
+                'b-minFDE6': brier_minFDE(k=6),
+                'IntentAcc': CustomAccuracy()
+            }
+        )
     
     def forward(self, data, mode):
         return self.model(data, mode)
