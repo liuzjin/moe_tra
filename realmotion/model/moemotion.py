@@ -77,6 +77,7 @@ class MoeMotion(nn.Module):
                     dim=embed_dim, 
                     mlp_ratio = mlp_ratio,
                     qkv_bias = qkv_bias,
+                    mlp_drop=mlp_drop,
                     query_cross_layers=query_cross_layers,
                     query_self_atten=query_self_atten,
                     query_self_layers=query_self_layers,
@@ -86,7 +87,9 @@ class MoeMotion(nn.Module):
                     top_k=top_k,
                     intent_label=intent_label)
             elif moe_type == "mlp":
-                self.decoder = SimpleSegmentalMoeDecoder(embed_dim,mlp_dim, future_steps, num_experts=num_experts, top_k=top_k, intent_label=intent_label, drop=mlp_drop)
+                self.decoder = SimpleSegmentalMoeDecoder(embed_dim,mlp_dim, future_steps,
+                    his_num_segments=self.num_segments, num_experts=num_experts, top_k=top_k, 
+                    intent_label=intent_label, drop=mlp_drop)
             elif moe_type == "hire_moe":
                 self.decoder = HierarchicalGatingDecoder(embed_dim, future_steps, intents=num_experts, top_k=top_k)
             elif moe_type == "cross_moe_mlp":

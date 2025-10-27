@@ -331,8 +331,6 @@ class MoeLightningModule(BaseLightningModule):
             }
         )
     
-    def forward(self, data, mode):
-        return self.model(data, mode)
     def cal_loss(self, out, data):
         # --- 1. 准备真值数据 ---
         # 确保只取需要的总长度，例如 60 步
@@ -345,7 +343,7 @@ class MoeLightningModule(BaseLightningModule):
         # 注意：为了清晰，我们假设 'out' 就是模型直接的返回，不再有 'y_hat' 嵌套
         predictions = out['y_hat']['predictions']             # (B, K, T, 2) - K个多模态轨迹
         y_hat_others = out.get('y_hat_others')       # 其他智能体的预测
-        mode_logits = out['y_hat']['logits']                  # (B, K) - 全局模态概率
+        mode_logits = out['y_hat']['pi']                  # (B, K) - 全局模态概率
         segment_logits_per_mode = out['y_hat']['segment_logits_per_mode'] # (B, K, S, N) - 分段意图logits
         
         # --- 3. 计算核心损失 ---
@@ -458,7 +456,7 @@ class MoeLightningModule(BaseLightningModule):
         
         # --- 1. 准备模型输出 ---
         predictions = out['y_hat']['predictions'] # (B, K, T, 2)
-        mode_logits = out['y_hat']['logits']      # (B, K)
+        mode_logits = out['y_hat']['pi']      # (B, K)
 
 
         # --- 2. Top-1 回归损失 ---
@@ -516,7 +514,7 @@ class MoeLightningModule(BaseLightningModule):
         # 添加 stage 前缀 (val/ or test/) 并记录
         self.log_dict({f"{k}": v for k, v in loss_dict.items()}, 
                     on_step=False, on_epoch=True, sync_dist=True)
-        mode_logits = out['y_hat']['logits']      # (B, K)
+        mode_logits = out['y_hat']['pi']      # (B, K)
         _, top1_indices = torch.max(mode_logits, dim=-1)
         segment_logits_per_mode = out['y_hat']['segment_logits_per_mode'] # (B, K, S, N)
         top1_segment_logits = segment_logits_per_mode[torch.arange(out['y_hat']['predictions'].shape[0]), top1_indices] # (B, S, N)

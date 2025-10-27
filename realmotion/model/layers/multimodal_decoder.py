@@ -89,6 +89,7 @@ class SimpleSegmentalMoeDecoder(nn.Module):
                  mlp_dim: int,
                  future_steps: int,
                  future_len: int = 60,
+                 his_num_segments: int = 5,
                  num_experts: int = 9, 
                  num_modes: int = 6, # K
                  top_k: int = 2,
@@ -100,6 +101,7 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         self.steps_per_segment = future_steps
         self.num_experts = num_experts
         self.num_modes = num_modes # K
+        self.his_num_segments = his_num_segments
         self.num_segments = future_len // future_steps
         self.top_k = top_k
         self.intent_label = intent_label
@@ -108,7 +110,7 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         # --- 1. 全局模态概率头 (MLP-based) ---
         # 输入全局场景编码(D)，输出K个模态的logits
         self.mode_prob_network = nn.Sequential(
-            nn.Linear(embed_dim, mlp_dim),
+            nn.Linear(his_num_segments * embed_dim, mlp_dim),
             nn.LayerNorm(mlp_dim),
             nn.ReLU(),
             nn.Dropout(drop),
@@ -118,7 +120,7 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         # --- 2. 分段门控网络 (MLP-based) ---
         # 输入全局场景编码(D)，一次性生成所有K个模态、所有S个分段的专家logits
         self.segment_gating_network = nn.Sequential(
-            nn.Linear(embed_dim, mlp_dim * 2),
+            nn.Linear(his_num_segments *embed_dim, mlp_dim * 2),
             nn.LayerNorm(mlp_dim * 2),
             nn.ReLU(),
             nn.Dropout(drop),
@@ -130,7 +132,7 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         # 专家依然是简单的MLP，但它们的输入现在需要变一下
         # 我们需要为每个分段生成一个独特的特征
         self.segment_feature_generator = nn.Sequential(
-            nn.Linear(embed_dim, self.num_segments * self.mlp_dim),
+            nn.Linear(his_num_segments *embed_dim, self.num_segments * self.mlp_dim),
             nn.LayerNorm(self.num_segments * self.mlp_dim),
             nn.ReLU(),
             nn.Dropout(drop) # <<< 4. 在激活函数后添加Dropout
@@ -151,7 +153,8 @@ class SimpleSegmentalMoeDecoder(nn.Module):
         # --- 步骤 1: 提取全局场景编码 ---
         # 假设我们使用编码器输出的第一个 token ([CLS] token)
         # scene_context shape: (B, D)
-        scene_context = encoder_out[:, 0]
+        scene_context = encoder_out[:, :self.his_num_segments]
+        scene_context = scene_context.reshape(batch_size, -1)
         
         # --- 步骤 2: 计算 K 个模态的全局概率 ---
         # (B, D) -> (B, K)
@@ -228,6 +231,7 @@ class QueryBasedMoeDecoder(nn.Module):
                  qkv_bias = False,
                  drop = 0.2,
                  attn_drop = 0.2,
+                 mlp_drop =0.2,
                  drop_path= 0.2,
                  query_cross_layers=1,
                  query_self_atten=True,
@@ -301,11 +305,11 @@ class QueryBasedMoeDecoder(nn.Module):
         self.mode_prob_head = nn.Linear(self.embed_dim, 1)
         # --- 4. 专家网络列表 (与之前相同) ---
         self.experts = nn.ModuleList([
-            MLPExpert(self.embed_dim, self.future_steps)
+            MLPExpert(self.embed_dim, self.future_steps, mlp_drop)
             for _ in range(self.num_experts)
         ])
 
-    def forward(self, context, training= True, key_padding_mask=None):
+    def forward(self, context, training= True, key_padding_mask=None, gt_intent_sequence=None):
         batch_size = context.shape[0]
         
         # --- 步骤 1: 生成时序分段特征 (和之前一样) ---
@@ -395,7 +399,7 @@ class QueryBasedMoeDecoder(nn.Module):
         output = {
             "predictions": final_predictions,   # (B, K, T, 2)
             "probs": mode_probs,                # (B, K)
-            "logits": mode_logits,              # (B, K)
+            "pi": mode_logits,              # (B, K)
             # 始终返回分段logits，由损失函数决定如何使用
             "segment_logits_per_mode": segment_logits_per_mode # (B, K, S, N)
         }

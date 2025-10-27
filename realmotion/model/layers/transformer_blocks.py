@@ -296,8 +296,8 @@ class DecoderLayer(nn.Module):
         
         # --- 模块2: 专家混合网络 (MoE) ---
         # 注意：这里我们使用 MoE 来代替标准的 FFN
-        # self.moe = MoE(dim, num_experts=num_experts, top_k=top_k, mlp_ratio=mlp_ratio)
-        self.ffn1 = MLP(dim, mlp_ratio=mlp_ratio)
+        self.moe = MoE(dim, num_experts=num_experts, top_k=top_k, mlp_ratio=mlp_ratio)
+        # self.ffn1 = MLP(dim, mlp_ratio=mlp_ratio)
         self.norm2 = nn.LayerNorm(dim)
         
         # --- 模块3: 自注意力 ---

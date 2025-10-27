@@ -22,8 +22,8 @@ pl_module:
     qkv_bias: False
     drop_path: 0.2
     mlp_drop: 0.0
-    moe: False
-    moe_type: "mlp"
+    moe: True
+    moe_type: "cross"
     query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1
