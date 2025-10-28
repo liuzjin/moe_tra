@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, HistoryCompressor
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
+from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
 from .layers.mtr_decoder import TransformerDecoder
 from .layers.transformer_blocks import Block, InteractionModule
 
@@ -41,11 +41,11 @@ class MoeMotion(nn.Module):
         self.hist_embed = AgentEmbeddingLayer(
             4, embed_dim // 4, drop_path_rate=drop_path
         )
-        self.num_segments = history_len // 10
+        self.num_segments = 3
         self.segment_pos_embed = nn.Parameter(
             torch.randn(1, 1, self.num_segments, embed_dim)
         )
-        self.hist_compress = HistoryCompressor(embed_dim, 10, 10)
+        self.hist_compress = HistoryCompressor(embed_dim, 30, 10)
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
         self.intent_label = intent_label
 
@@ -104,6 +104,16 @@ class MoeMotion(nn.Module):
                     num_experts=num_experts,
                     top_k=top_k,
                 )
+            elif moe_type == "intent_regre":
+                self.decoder = RegressionSegmentDecoder(
+                    embed_dim=embed_dim,
+                    num_modes=modes,
+                    future_len=future_len,
+                    future_steps=future_steps,
+                    num_experts=num_experts,
+                    top_k=top_k,
+                    num_heads= 8
+                    )
         else:
             self.decoder = MultimodalDecoder(embed_dim, future_steps,self.num_segments)
         self.dense_predictor = nn.Sequential(

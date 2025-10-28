@@ -152,6 +152,7 @@ class BaseLightningModule(pl.LightningModule):
             nn.MultiheadAttention,
             nn.LSTM,
             nn.GRU,
+            nn.GRUCell,
         )
         blacklist_weight_modules = (
             nn.BatchNorm1d,
