@@ -791,28 +791,7 @@ class RegressionSegmentDecoder(nn.Module):
             # b) 规划：决定下一步意图 (路由到专家)
             expert_logits = self.gating_network(thought_state) # (B*K, num_experts)
             
-            # c) 执行：通过MoE生成轨迹段 (向量化实现)
-            probs = F.softmax(expert_logits, dim=-1)
-            top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
-            # 归一化权重，使其和为1
-            top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
-
-            segment_output_flat = torch.zeros(B * self.num_modes, self.future_steps * 2, device=thought_state.device)
-            
-            for i in range(self.num_experts):
-                # 找到选择了当前专家i的所有条目
-                mask = (top_k_indices == i).any(dim=-1)
-                if mask.any():
-                    # 获取对应条目的权重
-                    # 注意：这里简化处理，直接使用第一个匹配的权重，更精确的实现会更复杂
-                    weights = top_k_probs[mask, (top_k_indices[mask] == i).nonzero(as_tuple=True)[1]]
-                    
-                    # 专家生成轨迹段
-                    expert_output = self.experts[i](thought_state[mask]) # (N_mask, steps*2)
-                    
-                    # 加权并累加到输出
-                    segment_output_flat[mask] += expert_output.view(-1, self.future_steps*2) * weights.unsqueeze(-1)
-            
+            segment_output_flat = self._moe_execution(thought_state, expert_logits)
             future_segments.append(segment_output_flat)
             
             # d) 更新：将生成的轨迹段编码，作为下一次GRU的输入
@@ -837,3 +816,64 @@ class RegressionSegmentDecoder(nn.Module):
             "logits": mode_logits,            # (B, K)
             "probs": F.softmax(mode_logits, dim=-1)
         }
+    def _moe_execution(self, state: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        """
+        高效、向量化的 MoE 执行函数。
+
+        Args:
+            state (torch.Tensor): 当前的思考状态, 形状 (N, D)，其中 N = B * K。
+            logits (torch.Tensor): 门控网络输出的 logits, 形状 (N, num_experts)。
+
+        Returns:
+            torch.Tensor: 加权求和后的轨迹段输出, 形状 (N, future_steps * 2)。
+        """
+        # 1. 选择 Top-K 专家及其权重
+        probs = F.softmax(logits, dim=-1)
+        # top_k_probs: (N, top_k), top_k_indices: (N, top_k)
+        top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
+        # 归一化权重
+        top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
+
+        # 2. 准备分发 (Dispatch)
+        # 创建一个扁平化的索引，指明每个 "token-expert" 对属于哪个专家
+        # (N, top_k) -> (N * top_k)
+        flat_indices = top_k_indices.view(-1)
+        
+        # 将输入状态重复 top_k 次，以匹配扁平化的索引
+        # (N, D) -> (N * top_k, D)
+        repeated_state = state.repeat_interleave(self.top_k, dim=0)
+
+        # 3. 批量执行专家网络
+        # 初始化一个空的输出张量
+        y_flat = torch.zeros(
+            state.shape[0] * self.top_k, 
+            self.future_steps * 2, 
+            device=state.device,
+            dtype=state.dtype
+        )
+        
+        # 这个循环遍历专家数量 (e.g., 9)，而不是批次大小
+        for i in range(self.num_experts):
+            # 找到所有分配给当前专家 i 的任务
+            mask = (flat_indices == i)
+            
+            if mask.any():
+                # 收集所有需要该专家处理的输入状态
+                expert_inputs = repeated_state[mask]
+                # 一次性地送入专家网络进行计算
+                expert_outputs = self.experts[i](expert_inputs)
+                # 将结果放回扁平化的输出张量中
+                y_flat[mask] = expert_outputs.view(-1, self.future_steps*2)
+        
+        # 4. 加权聚合 (Combine)
+        # (N * top_k, steps * 2) -> (N, top_k, steps * 2)
+        y = y_flat.view(state.shape[0], self.top_k, -1)
+        
+        # 使用 top_k 的权重进行加权求和
+        # (N, top_k, 1) * (N, top_k, steps * 2) -> (N, top_k, steps * 2)
+        weighted_y = top_k_probs.unsqueeze(-1) * y
+        
+        # (N, top_k, steps * 2) -> (N, steps * 2)
+        final_output = torch.sum(weighted_y, dim=1)
+        
+        return final_output
