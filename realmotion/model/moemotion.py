@@ -39,13 +39,13 @@ class MoeMotion(nn.Module):
         super().__init__()
         
         self.hist_embed = AgentEmbeddingLayer(
-            4, embed_dim // 4, drop_path_rate=drop_path
+            4, embed_dim // 8, drop_path_rate=drop_path
         )
-        self.num_segments = 3
+        self.num_segments = 7
         self.segment_pos_embed = nn.Parameter(
             torch.randn(1, 1, self.num_segments, embed_dim)
         )
-        self.hist_compress = HistoryCompressor(embed_dim, 30, 10)
+        # self.hist_compress = HistoryCompressor(embed_dim, 30, 10)
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
         self.intent_label = intent_label
 
@@ -167,7 +167,8 @@ class MoeMotion(nn.Module):
         actor_feat = self.hist_embed(
             hist_feat[hist_feat_key_valid].permute(0, 2, 1).contiguous()
         )
-        actor_feat = self.hist_compress(actor_feat)
+        # actor_feat = self.hist_compress(actor_feat)
+        actor_feat = actor_feat.permute(0, 2, 1).contiguous()
         segment = actor_feat.shape[-2]
 
         actor_feat_tmp = torch.zeros(

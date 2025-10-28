@@ -13,10 +13,10 @@ class AgentEmbeddingLayer(nn.Module):
         in_chans=3,
         embed_dim=32,
         mlp_ratio=3,
-        kernel_size=[3, 3, 5],
-        depths=[2, 2, 2],
-        num_heads=[2, 4, 8],
-        out_indices=[0, 1, 2],
+        kernel_size=[3, 3, 5, 5],
+        depths=[2, 2, 2, 2],
+        num_heads=[2, 4, 8, 16],
+        out_indices=[0, 1, 2, 3],
         drop_rate=0.2,
         attn_drop_rate=0.2,
         drop_path_rate=0.2,
@@ -84,7 +84,7 @@ class AgentEmbeddingLayer(nn.Module):
                 align_corners=False,
             )
 
-        out = self.fpn_conv(laterals[0])
+        out = self.fpn_conv(laterals[-1])
 
         # return out[:, :, -1]
         return out
