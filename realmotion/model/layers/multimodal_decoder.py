@@ -685,7 +685,16 @@ class RegressionSegmentDecoder(nn.Module):
                  future_steps: int,
                  num_experts: int,
                  top_k: int,
-                 num_heads: int = 8):
+                 num_heads: int = 8,
+                 mlp_ratio = 4.0,
+                 qkv_bias = False,
+                 drop = 0.2,
+                 attn_drop = 0.2,
+                 mlp_drop =0.2,
+                 drop_path= 0.2,
+                 act_layer=nn.GELU,
+                 norm_layer=nn.LayerNorm,
+                 query_cross_layers=2):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_modes = num_modes
@@ -700,8 +709,20 @@ class RegressionSegmentDecoder(nn.Module):
         self.mode_queries = nn.Parameter(torch.randn(1, self.num_modes, self.embed_dim))
         
         # 交叉注意力，用于融合历史意图和模态查询
-        self.history_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        # self.history_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.history_norm = nn.LayerNorm(embed_dim)
+
+        self.history_attn =nn.ModuleList(InterBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
 
         # --- 2. 自回归循环模块 ---
         # GRUCell用于在每个时间步更新“思考状态”
@@ -738,12 +759,15 @@ class RegressionSegmentDecoder(nn.Module):
         queries = self.mode_queries.expand(B, -1, -1) # (B, K, D)
         
         # 使用交叉注意力，让每个模态查询关注相关的历史意图
-        initial_state, _ = self.history_attn(
-            query=queries,
-            key=history_intent_embeddings,
-            value=history_intent_embeddings,
-            key_padding_mask=key_padding_mask
-        )
+        # initial_state, _ = self.history_attn(
+        #     query=queries,
+        #     key=history_intent_embeddings,
+        #     value=history_intent_embeddings,
+        #     key_padding_mask=key_padding_mask
+        # )
+        for blk in self.history_attn:
+            initial_state = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+        
         initial_state = self.history_norm(initial_state + queries) # (B, K, D)
 
         # --- 步骤 2: 预测全局模态概率 ---

@@ -17,7 +17,7 @@ pl_module:
     mlp_drop: 0.0
     moe: True
     moe_type: "intent_regre"
-    query_cross_layers: 2
+    query_cross_layers: 4
     query_self_atten: True
     query_self_layers: 1
     num_experts: ${num_experts}

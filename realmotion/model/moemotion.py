@@ -103,6 +103,7 @@ class MoeMotion(nn.Module):
                     use_moe_ffn=attn_moe_mlp, # 控制是否在FFN中使用MoE
                     num_experts=num_experts,
                     top_k=top_k,
+                    
                 )
             elif moe_type == "intent_regre":
                 self.decoder = RegressionSegmentDecoder(
@@ -112,7 +113,11 @@ class MoeMotion(nn.Module):
                     future_steps=future_steps,
                     num_experts=num_experts,
                     top_k=top_k,
-                    num_heads= 8
+                    num_heads= 8,
+                    mlp_ratio = mlp_ratio,
+                    qkv_bias = qkv_bias,
+                    mlp_drop=mlp_drop,
+                    query_cross_layers=query_cross_layers,
                     )
         else:
             self.decoder = MultimodalDecoder(embed_dim, future_steps,self.num_segments)
