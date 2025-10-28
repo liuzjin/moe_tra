@@ -39,7 +39,7 @@ class MoeMotion(nn.Module):
         super().__init__()
         
         self.hist_embed = AgentEmbeddingLayer(
-            4, embed_dim // 8, drop_path_rate=drop_path
+            6, embed_dim // 8, drop_path_rate=drop_path
         )
         self.num_segments = 7
         self.segment_pos_embed = nn.Parameter(
@@ -152,10 +152,13 @@ class MoeMotion(nn.Module):
     def forward(self, data, mode):
         hist_valid_mask = data['x_valid_mask']
         hist_key_valid_mask = data['x_key_valid_mask']
+        hist_angles = data['x_angles']
+        heading_vectors = torch.stack([torch.cos(hist_angles), torch.sin(hist_angles)], dim=-1)
         hist_feat = torch.cat(
             [
                 data['x_positions_diff'],
                 data['x_velocity_diff'][..., None],
+                heading_vectors,
                 hist_valid_mask[..., None],
             ],
             dim=-1,
