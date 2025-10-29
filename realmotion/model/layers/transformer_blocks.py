@@ -234,6 +234,86 @@ class InterBlock(nn.Module):
         src = src + self.drop_path2(self.mlp(self.norm2(src)))
         return src
 
+class Inter_cross_self_Block(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=False,
+        drop=0.2,
+        attn_drop=0.2,
+        drop_path=0.2,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+    ):
+        super().__init__()
+
+        self.norm1 = norm_layer(dim)
+        self.cross_attn = torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            add_bias_kv=qkv_bias,
+            dropout=attn_drop,
+            batch_first=True,
+        )
+        self.self_attn = torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            add_bias_kv=qkv_bias,
+            dropout=attn_drop,
+            batch_first=True,
+        )
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.norm2 = norm_layer(dim)
+        self.norm3 = norm_layer(dim)
+        self.norm4 = norm_layer(dim)
+        self.mlp_1 = Mlp(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=drop,
+        )
+        self.mlp_2 = Mlp(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=drop,
+        )
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path3 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path4 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        src,
+        src_kv,
+        mask: Optional[Tensor] = None,
+        key_padding_mask: Optional[Tensor] = None,
+    ):
+        src1 = self.norm1(src)
+        src1_kv = self.norm1(src_kv)
+        src1 = self.cross_attn(
+            query=src1,
+            key=src1_kv,
+            value=src1_kv,
+            attn_mask=mask,
+            key_padding_mask=key_padding_mask,
+        )[0]
+        src = src + self.drop_path1(src1)
+        src = src + self.drop_path2(self.mlp_1(self.norm2(src)))
+
+        src2 = self.norm3(src)
+        src2 = self.self_attn(
+            query=src2,
+            key=src2,
+            value=src2,
+        )[0]
+        src = src + self.drop_path3(src2)
+        src = src + self.drop_path4(self.mlp_2(self.norm4(src)))
+        return src
+
 class MLP(nn.Module):
     def __init__(self, dim, mlp_ratio=4.0):
         super().__init__()

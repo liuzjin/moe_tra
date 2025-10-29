@@ -9,7 +9,7 @@ pl_module:
     history_len: ${history_len}
     future_steps: ${n_step}
     future_len: ${future_len}
-    encoder_depth: 4
+    encoder_depth: 2
     num_heads: 8
     mlp_ratio: 4.0
     qkv_bias: False
@@ -17,7 +17,7 @@ pl_module:
     mlp_drop: 0.0
     moe: True
     moe_type: "intent_regre"
-    query_cross_layers: 4
+    query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1
     num_experts: ${num_experts}

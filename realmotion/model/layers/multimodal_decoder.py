@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple
 
-from realmotion.model.layers.transformer_blocks import Block, DecoderLayer, InterBlock
+from realmotion.model.layers.transformer_blocks import Block, DecoderLayer, Inter_cross_self_Block, InterBlock
 
 class MultimodalDecoder(nn.Module):
     """A naive MLP-based multimodal decoder"""
@@ -711,8 +711,8 @@ class RegressionSegmentDecoder(nn.Module):
         # 交叉注意力，用于融合历史意图和模态查询
         # self.history_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.history_norm = nn.LayerNorm(embed_dim)
-
-        self.history_attn =nn.ModuleList(InterBlock(
+        self.context_norm = nn.LayerNorm(embed_dim)
+        self.query_init =nn.ModuleList(Inter_cross_self_Block(
                     dim=embed_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
@@ -723,6 +723,18 @@ class RegressionSegmentDecoder(nn.Module):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
+
+        self.query_attn =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(self.num_segments))
 
         # --- 2. 自回归循环模块 ---
         # GRUCell用于在每个时间步更新“思考状态”
@@ -758,17 +770,10 @@ class RegressionSegmentDecoder(nn.Module):
         # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
         queries = self.mode_queries.expand(B, -1, -1) # (B, K, D)
         
-        # 使用交叉注意力，让每个模态查询关注相关的历史意图
-        # initial_state, _ = self.history_attn(
-        #     query=queries,
-        #     key=history_intent_embeddings,
-        #     value=history_intent_embeddings,
-        #     key_padding_mask=key_padding_mask
-        # )
-        for blk in self.history_attn:
+        for blk in self.query_init:
             initial_state = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
         
-        initial_state = self.history_norm(initial_state + queries) # (B, K, D)
+        initial_state = self.history_norm(initial_state) # (B, K, D)
 
         # --- 步骤 2: 预测全局模态概率 ---
         # 基于对历史的初始理解，直接预测每个模态的可能性
@@ -777,21 +782,23 @@ class RegressionSegmentDecoder(nn.Module):
         # --- 步骤 3: 准备自回归生成 ---
         # 将所有模态展平到一个批次中，以进行高效的并行计算
         thought_state = initial_state.view(B * self.num_modes, self.embed_dim)
-        
-        # 初始化GRU的第一个输入（可以是一个零向量）
         gru_input = torch.zeros_like(thought_state)
         
         future_segments = []
 
         # --- 步骤 4: 自回归循环 ---
-        for _ in range(self.num_segments):
+        for i in range(self.num_segments):
             # a) 更新思考状态
             thought_state = self.gru_cell(gru_input, thought_state)
 
             # b) 规划：决定下一步意图 (路由到专家)
-            expert_logits = self.gating_network(thought_state) # (B*K, num_experts)
+            thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
+            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+            rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
+            rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
+            expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
             
-            segment_output_flat = self._moe_execution(thought_state, expert_logits)
+            segment_output_flat = self._moe_execution(rich_thought_state, expert_logits)
             future_segments.append(segment_output_flat)
             
             # d) 更新：将生成的轨迹段编码，作为下一次GRU的输入
