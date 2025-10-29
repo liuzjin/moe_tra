@@ -9,7 +9,7 @@ pl_module:
     history_len: ${history_len}
     future_steps: ${n_step}
     future_len: ${future_len}
-    encoder_depth: 2
+    encoder_depth: 4
     num_heads: 8
     mlp_ratio: 4.0
     qkv_bias: False
@@ -24,7 +24,7 @@ pl_module:
     top_k: ${top_k}
     intent_label: ${intent_label}
   optim:
-    lr: 1e-3
+    lr: 2e-3
     weight_decay: 1e-2
     min_lr: 1e-5
     epochs: ${epochs}

@@ -38,14 +38,14 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 1
-batch_size: 48
+gpus: 8
+batch_size: 32
 epochs: 100
 checkpoint: 
 submit:
 n_step: 30
 top_k: 2
-num_experts: 9
+num_experts: 8
 future_len: 60
 history_len: 50
 intent_label: False
