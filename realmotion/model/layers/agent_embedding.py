@@ -21,6 +21,7 @@ class AgentEmbeddingLayer(nn.Module):
         attn_drop_rate=0.2,
         drop_path_rate=0.2,
         norm_layer=nn.LayerNorm,
+        moe=False
     ) -> None:
         super().__init__()
 
@@ -44,6 +45,7 @@ class AgentEmbeddingLayer(nn.Module):
                 drop_path=dpr[sum(depths[:i]) : sum(depths[: i + 1])],
                 norm_layer=norm_layer,
                 downsample=(i < self.num_levels - 1),
+                moe=moe,
             )
             self.levels.append(level)
 
@@ -163,6 +165,7 @@ class NATLayer(nn.Module):
         drop_path=0.2,
         act_layer=nn.GELU,
         norm_layer=nn.LayerNorm,
+        moe=False,
     ):
         super().__init__()
         self.dim = dim
@@ -183,13 +186,15 @@ class NATLayer(nn.Module):
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
-        self.mlp = MoE(dim, num_experts=6, top_k=2, mlp_ratio=mlp_ratio)
-        # self.mlp = Mlp(
-        #     in_features=dim,
-        #     hidden_features=int(dim * mlp_ratio),
-        #     act_layer=act_layer,
-        #     drop=drop,
-        # )
+        if moe:
+            self.mlp = MoE(dim, num_experts=6, top_k=2, mlp_ratio=mlp_ratio)
+        else:
+            self.mlp = Mlp(
+                in_features=dim,
+                hidden_features=int(dim * mlp_ratio),
+                act_layer=act_layer,
+                drop=drop,
+            )
 
     def forward(self, x):
         shortcut = x
@@ -217,6 +222,7 @@ class NATBlock(nn.Module):
         drop_path=0.2,
         norm_layer=nn.LayerNorm,
         act_layer=nn.GELU,
+        moe=False,
     ):
         super().__init__()
         self.dim = dim
@@ -239,6 +245,7 @@ class NATBlock(nn.Module):
                     else drop_path,
                     norm_layer=norm_layer,
                     act_layer=act_layer,
+                    moe=moe,
                 )
                 for i in range(depth)
             ]

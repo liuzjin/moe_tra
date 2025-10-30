@@ -26,6 +26,7 @@ class MoeMotion(nn.Module):
         future_steps=60,
         future_len=60,
         moe=True,
+        his_embed_moe=False,
         moe_type="cross",
         query_cross_layers=2,
         query_self_atten=True,
@@ -39,7 +40,7 @@ class MoeMotion(nn.Module):
         super().__init__()
         
         self.hist_embed = AgentEmbeddingLayer(
-            6, embed_dim // 8, drop_path_rate=drop_path
+            6, embed_dim // 8, drop_path_rate=drop_path,moe=his_embed_moe,
         )
         self.num_segments = 7
         self.segment_pos_embed = nn.Parameter(
