@@ -56,6 +56,17 @@ class MoeMotion(nn.Module):
         )
 
         dpr = [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
+
+        self.map_blocks = nn.ModuleList(
+            Block(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+            )
+            for i in range(2)
+        )
         self.blocks = nn.ModuleList(
             Block(
                 dim=embed_dim,
@@ -207,8 +218,11 @@ class MoeMotion(nn.Module):
         actor_feat += actor_type_embed
         lane_feat += lane_type_embed
 
-        x_encoder = torch.cat([actor_feat, lane_feat], dim=1)
+        
+        for blk in self.map_blocks:
+            lane_feat = blk(lane_feat, key_padding_mask=~data['lane_key_valid_mask'])
 
+        x_encoder = torch.cat([actor_feat, lane_feat], dim=1)
         key_valid_mask = torch.cat(
             [data['x_key_valid_mask'].unsqueeze(-1).repeat(1, 1, segment).reshape(B, -1), data['lane_key_valid_mask']], dim=1
         )
