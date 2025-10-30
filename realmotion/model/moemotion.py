@@ -57,16 +57,6 @@ class MoeMotion(nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
 
-        self.agent_blocks = nn.ModuleList(
-            Block(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=dpr[i],
-            )
-            for i in range(2)
-        )
         self.blocks = nn.ModuleList(
             Block(
                 dim=embed_dim,
@@ -190,13 +180,6 @@ class MoeMotion(nn.Module):
         actor_feat_tmp[hist_feat_key_valid] = actor_feat
         actor_feat = actor_feat_tmp.view(B, N, segment, actor_feat.shape[-1])
 
-        actor_feat = actor_feat.permute(0, 2, 1, 3).reshape(B*segment,  N , actor_feat.shape[-1])
-        mask = data['x_key_valid_mask'].unsqueeze(-1).repeat(1, 1, segment).permute(0, 2, 1).reshape(B*segment, N)
-        for blk in self.agent_blocks:
-            actor_feat = blk(actor_feat, key_padding_mask=~mask)
-        actor_feat = actor_feat.reshape(B, segment, N, actor_feat.shape[-1]).permute(0, 2, 1, 3)
-        
-        
         actor_feat = actor_feat + self.segment_pos_embed
         actor_feat = actor_feat.reshape(B, -1, actor_feat.shape[-1])
 

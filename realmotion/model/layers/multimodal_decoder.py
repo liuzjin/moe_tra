@@ -750,7 +750,7 @@ class RegressionSegmentDecoder(nn.Module):
         # --- 2. 自回归循环模块 ---
         # GRUCell用于在每个时间步更新“思考状态”
         self.gru_cell = nn.GRUCell(input_size=embed_dim, hidden_size=embed_dim)
-
+        # self.attn_layer = nn.MultiheadAttention(embed_dim, num_heads)
         # 门控网络(Planner)，根据思考状态决定调用哪个专家
         self.gating_network = nn.Linear(embed_dim, num_experts)
         
@@ -793,15 +793,16 @@ class RegressionSegmentDecoder(nn.Module):
         # --- 步骤 3: 准备自回归生成 ---
         # 将所有模态展平到一个批次中，以进行高效的并行计算
         thought_state = initial_state.view(B * self.num_modes, self.embed_dim)
-        gru_input = torch.zeros_like(thought_state)
-        
+        # gru_input = torch.zeros_like(thought_state)
+        gru_input = history_intent_embeddings[:, :7, :].mean(dim=1).unsqueeze(1).expand(-1, self.num_modes, -1)
+        gru_input = gru_input.reshape(B * self.num_modes, self.embed_dim)
         future_segments = []
 
         # --- 步骤 4: 自回归循环 ---
         for i in range(self.num_segments):
             # a) 更新思考状态
             thought_state = self.gru_cell(gru_input, thought_state)
-
+            # thought_state = self.attn_layer(gru_input, thought_state, thought_state)[0]
             # b) 规划：决定下一步意图 (路由到专家)
             thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
             context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
