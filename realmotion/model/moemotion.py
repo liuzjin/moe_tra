@@ -4,10 +4,9 @@ import torch
 import torch.nn as nn
 
 
-from .layers.agent_embedding import AgentEmbeddingLayer, HistoryCompressor
+from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
 from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
-from .layers.mtr_decoder import TransformerDecoder
 from .layers.transformer_blocks import Block, InteractionModule
 
 
