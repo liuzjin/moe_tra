@@ -89,9 +89,59 @@ class AgentEmbeddingLayer(nn.Module):
         out = self.fpn_conv(laterals[-1])
 
         # return out[:, :, -1]
-        return out
+        return out.permute(0, 2, 1).contiguous()
     
+class AgentEmbeddingLayer_light(nn.Module):
+    def __init__(
+        self,
+        in_chans=3,
+        embed_dim=32,
+        mlp_ratio=3,
+        kernel_size=[3, 3, 5, 5],
+        depths=[2, 2, 2, 2],
+        num_heads=[2, 4, 8, 16],
+        out_indices=[0, 1, 2, 3],
+        drop_rate=0.2,
+        attn_drop_rate=0.2,
+        drop_path_rate=0.2,
+        norm_layer=nn.LayerNorm,
+        moe=[False, False, False, False]
+    ) -> None:
+        super().__init__()
 
+        self.embed = ConvTokenizer(in_chans, embed_dim)
+        self.num_levels = len(depths)
+        self.last_dim = int(embed_dim * 2**(self.num_levels - 1))
+        self.out_indices = out_indices
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+        self.levels = nn.ModuleList()
+        for i in range(self.num_levels):
+            level = NATBlock(
+                dim=int(embed_dim * 2**i),
+                depth=depths[i],
+                num_heads=num_heads[i],
+                kernel_size=kernel_size[i],
+                dilations=None,
+                mlp_ratio=mlp_ratio,
+                drop=drop_rate,
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[sum(depths[:i]) : sum(depths[: i + 1])],
+                norm_layer=norm_layer,
+                downsample=(i < self.num_levels - 1),
+                moe=moe[i],
+            )
+            self.levels.append(level)
+        self.final_norm = norm_layer(self.last_dim)
+
+    def forward(self, x):
+        """x: [B, C, T]"""
+        x = self.embed(x)
+
+        for idx, level in enumerate(self.levels):
+            x, xo = level(x)
+        out = self.final_norm(x)
+        return out
 
 class ConvTokenizer(nn.Module):
     def __init__(self, in_chans=3, embed_dim=32, norm_layer=None):

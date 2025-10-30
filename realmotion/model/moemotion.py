@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 
-from .layers.agent_embedding import AgentEmbeddingLayer
+from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
 from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
 from .layers.transformer_blocks import Block, InteractionModule
@@ -170,8 +170,7 @@ class MoeMotion(nn.Module):
         actor_feat = self.hist_embed(
             hist_feat[hist_feat_key_valid].permute(0, 2, 1).contiguous()
         )
-        # actor_feat = self.hist_compress(actor_feat)
-        actor_feat = actor_feat.permute(0, 2, 1).contiguous()
+
         segment = actor_feat.shape[-2]
 
         actor_feat_tmp = torch.zeros(
