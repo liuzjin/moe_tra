@@ -205,14 +205,6 @@ class MoeMotion(nn.Module):
         actor_type_indices = data['x_attr'][..., 2].long().unsqueeze(-1).repeat(1, 1, segment).view(B, N*segment)
         actor_type_embed = self.actor_type_embed[actor_type_indices]
 
-
-        # x_centers = torch.cat([data['x_centers'], data['lane_centers']], dim=1)
-        # angles = torch.cat([data['x_angles'][:, :, -1], data['lane_angles']], dim=1)
-        # x_angles = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
-        # pos_feat = torch.cat([x_centers, x_angles], dim=-1)
-        # pos_embed = self.pos_embed(pos_feat)
-        # actor_type_embed = self.actor_type_embed[data['x_attr'][..., 2].long()]
-       
         lane_type_embed = self.lane_type_embed.repeat(B, M, 1)
         actor_feat += actor_type_embed
         lane_feat += lane_type_embed
