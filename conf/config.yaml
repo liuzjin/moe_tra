@@ -39,7 +39,7 @@ tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
 gpus: 1
-batch_size: 32
+batch_size: 40
 epochs: 100
 checkpoint: 
 submit:

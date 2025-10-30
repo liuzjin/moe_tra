@@ -724,18 +724,7 @@ class RegressionSegmentDecoder(nn.Module):
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
 
-        # self.query_attn =nn.ModuleList(Inter_cross_self_Block(
-        #             dim=embed_dim,
-        #             num_heads=num_heads,
-        #             mlp_ratio=mlp_ratio,
-        #             qkv_bias=qkv_bias,
-        #             drop=drop,
-        #             attn_drop=attn_drop,
-        #             drop_path=drop_path,
-        #             act_layer=act_layer,
-        #             norm_layer=norm_layer,
-        #         ) for i in range(self.num_segments))
-        self.query_attn =Inter_cross_self_Block(
+        self.query_attn =nn.ModuleList(Inter_cross_self_Block(
                     dim=embed_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
@@ -745,7 +734,18 @@ class RegressionSegmentDecoder(nn.Module):
                     drop_path=drop_path,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                )
+                ) for i in range(self.num_segments))
+        # self.query_attn =Inter_cross_self_Block(
+        #             dim=embed_dim,
+        #             num_heads=num_heads,
+        #             mlp_ratio=mlp_ratio,
+        #             qkv_bias=qkv_bias,
+        #             drop=drop,
+        #             attn_drop=attn_drop,
+        #             drop_path=drop_path,
+        #             act_layer=act_layer,
+        #             norm_layer=norm_layer,
+        #         )
 
         # --- 2. 自回归循环模块 ---
         # GRUCell用于在每个时间步更新“思考状态”
@@ -804,7 +804,7 @@ class RegressionSegmentDecoder(nn.Module):
 
             # b) 规划：决定下一步意图 (路由到专家)
             thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
-            context_output = self.query_attn(src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
             rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
             rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
             expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
