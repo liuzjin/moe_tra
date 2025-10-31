@@ -901,6 +901,8 @@ class Regress_refine(RegressionSegmentDecoder):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.intent_queries = nn.Parameter(torch.randn(1, self.num_modes, self.num_segments, self.embed_dim))
+        self.initial_gating = nn.Linear(self.embed_dim, self.num_experts)
+        
     def forward(self, history_intent_embeddings,mode, key_padding_mask=None,gt_intent_sequence=None):
         B = history_intent_embeddings.shape[0]
 
@@ -923,7 +925,7 @@ class Regress_refine(RegressionSegmentDecoder):
 
         # --- 阶段二: 非自回归初步轨迹生成 ---
         all_intents_flat = planned_intents.reshape(-1, self.embed_dim)
-        expert_logits = self.gating_network(all_intents_flat)
+        expert_logits = self.initial_gating(all_intents_flat)
         initial_segments_flat = self._moe_execution(all_intents_flat, expert_logits)
         # (B*K*S, steps*2) -> (B*K, S, steps*2)
         initial_segments = initial_segments_flat.view(B * self.num_modes, self.num_segments, -1)
