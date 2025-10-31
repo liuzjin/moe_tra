@@ -38,7 +38,7 @@ class MoeMotion(nn.Module):
     ) -> None:
         super().__init__()
         
-        self.hist_embed = AgentEmbeddingLayer(
+        self.hist_embed = AgentEmbeddingLayer_light(
             6, embed_dim // 8, drop_path_rate=drop_path,moe=his_embed_moe,
         )
         self.num_segments = 7
