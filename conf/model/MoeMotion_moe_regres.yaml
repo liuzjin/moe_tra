@@ -3,13 +3,13 @@ tag: MoeMotion_moe_regres
 pl_module:
   _target_: realmotion.model.pl_modules.BaseLightningModule
   model:
-    _target_: realmotion.model.moemotion.MoeMotion
+    _target_: realmotion.model.moemotion.MoeMotion_new
     embed_dim: 128
     mlp_dim: 128
     history_len: ${history_len}
     future_steps: ${n_step}
     future_len: ${future_len}
-    encoder_depth: 4
+    encoder_depth: 2
     num_heads: 8
     mlp_ratio: 4.0
     qkv_bias: False

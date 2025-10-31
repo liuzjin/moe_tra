@@ -314,6 +314,115 @@ class Inter_cross_self_Block(nn.Module):
         src = src + self.drop_path4(self.mlp_2(self.norm4(src)))
         return src
 
+class Inter_map_hist_Block(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=False,
+        drop=0.2,
+        attn_drop=0.2,
+        drop_path=0.2,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+    ):
+        super().__init__()
+
+        
+        self.hist_attn = torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            add_bias_kv=qkv_bias,
+            dropout=attn_drop,
+            batch_first=True,
+        )
+        self.map_attn = torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            add_bias_kv=qkv_bias,
+            dropout=attn_drop,
+            batch_first=True,
+        )
+        self.self_attn = torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            add_bias_kv=qkv_bias,
+            dropout=attn_drop,
+            batch_first=True,
+        )
+        self.norm1 = norm_layer(dim)
+        self.norm2 = norm_layer(dim)
+        self.norm3 = norm_layer(dim)
+        self.norm4 = norm_layer(dim)
+        self.norm5 = norm_layer(dim)
+        self.norm6 = norm_layer(dim)
+        self.mlp_1 = Mlp(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=drop,
+        )
+        self.mlp_2 = Mlp(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=drop,
+        )
+        self.mlp_3 = Mlp(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=drop,
+        )
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path3 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path4 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path5 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path6 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        src,
+        hist_feat,
+        map_feat,
+        hist_mask: Optional[Tensor] = None,
+        map_mask: Optional[Tensor] = None,
+    ):
+        src1 = self.norm1(src)
+        src1_kv = self.norm1(hist_feat)
+        src1 = self.hist_attn(
+            query=src1,
+            key=src1_kv,
+            value=src1_kv,
+            attn_mask=None,
+            key_padding_mask=hist_mask,
+        )[0]
+        src = src + self.drop_path1(src1)
+        src = src + self.drop_path2(self.mlp_1(self.norm2(src)))
+
+        src2 = self.norm3(src)
+        src2_kv = self.norm3(map_feat)
+        src2 = self.map_attn(
+            query=src2,
+            key=src2_kv,
+            value=src2_kv,
+            key_padding_mask=map_mask,
+        )[0]
+        src = src + self.drop_path3(src2)
+        src = src + self.drop_path4(self.mlp_2(self.norm4(src)))
+
+        src = self.norm5(src)
+        src = self.self_attn(
+            query=src,
+            key=src,
+            value=src,
+        )[0]
+        src = src + self.drop_path5(src)
+        src = src + self.drop_path4(self.mlp_3(self.norm6(src)))
+        return src
+    
 class MLP(nn.Module):
     def __init__(self, dim, mlp_ratio=4.0):
         super().__init__()
