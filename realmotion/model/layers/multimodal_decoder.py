@@ -987,7 +987,7 @@ class Regress_refine(RegressionSegmentDecoder):
             refine_embed = blk(src=refine_embed,src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
 
         refine = self.refine_head(refine_embed).view(B, self.num_modes, self.future_len, 2)
-
+        refine = refine + final_predictions
         return {
             "predictions": refine, # (B, K, T, 2)
             "propose": final_predictions, # (B, K, T, 2)
@@ -1045,7 +1045,7 @@ class Regress_refine_v2(Regress_refine):
             refine_embed = blk(src=refine_embed,src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
 
         refine = self.refine_head(refine_embed).view(B, self.num_modes, self.future_len, 2)
-
+        refine = refine + final_predictions
         return {
             "predictions": refine, # (B, K, T, 2)
             "propose": final_predictions, # (B, K, T, 2)
