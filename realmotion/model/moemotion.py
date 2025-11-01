@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, RegressionSegmentDecoder, RegressionSegmentDecoder_v2, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
+from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
 from .layers.transformer_blocks import Block, InterBlock, InteractionModule
 
 
@@ -107,7 +107,7 @@ class MoeMotion(nn.Module):
                     
                 )
             elif moe_type == "intent_regre":
-                self.decoder = Regress_refine(
+                self.decoder = Regress_refine_v2(
                     embed_dim=embed_dim,
                     num_modes=modes,
                     future_len=future_len,

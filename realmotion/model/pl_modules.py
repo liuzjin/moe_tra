@@ -211,6 +211,85 @@ class BaseLightningModule(pl.LightningModule):
         )
         return [optimizer], [scheduler]
 
+class RegLightningModule(BaseLightningModule):
+    def cal_loss(self, out, data, tag=''):
+        y_hat, pi, y_hat_others = out['y_hat'], out['pi'], out['y_hat_others']
+        propose = out.get('propose', None)
+        y, y_others = data['target'][:, 0], data['target'][:, 1:]
+        l2_norm = torch.norm(propose[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+        best_mode = torch.argmin(l2_norm, dim=-1)
+        y_propose_best = propose[torch.arange(y_hat_others.shape[0]), best_mode]
+        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+
+        agent_pro_reg_loss = F.smooth_l1_loss(y_propose_best[..., :2], y)
+        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
+        agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
+
+        others_reg_mask = data['target_mask'][:, 1:]
+        others_reg_loss = F.smooth_l1_loss(
+            y_hat_others[others_reg_mask], y_others[others_reg_mask]
+        )
+
+        loss = agent_pro_reg_loss + agent_reg_loss + agent_cls_loss + others_reg_loss 
+        disp_dict = {
+            f'{tag}loss': loss.item(),
+            f'{tag}pro_reg_loss': agent_pro_reg_loss.item(),
+            f'{tag}reg_loss': agent_reg_loss.item(),
+            f'{tag}cls_loss': agent_cls_loss.item(),
+            f'{tag}others_reg_loss': others_reg_loss.item(),
+        }
+
+        return loss, disp_dict
+
+    def training_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
+        out = self(data, True)
+        
+        out['pi'] = out['y_hat']['logits']
+        out['propose'] = out['y_hat']['propose']
+        out['y_hat'] = out['y_hat']['predictions']
+        
+        loss, loss_dict = self.cal_loss(out, data)
+
+        for k, v in loss_dict.items():
+            self.log(
+                f'train/{k}',
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
+
+        return loss
+    def validation_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
+        out = self(data, False)
+        out['pi'] = out['y_hat']['logits']
+        out['propose'] = out['y_hat']['propose']
+        out['y_hat'] = out['y_hat']['predictions']
+        
+        _, loss_dict = self.cal_loss(out, data)
+        metrics = self.metrics(out, data['target'][:, 0])
+
+        self.log(
+            'val/reg_loss',
+            loss_dict['reg_loss'],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+        )
+        self.log_dict(
+            metrics,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=1,
+            sync_dist=True,
+        )
 
 class StreamLightningModule(BaseLightningModule):
     def __init__(self,
