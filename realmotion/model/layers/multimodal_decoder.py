@@ -770,7 +770,7 @@ class RegressionSegmentDecoder(nn.Module):
         # 预测每个模态的概率
         self.prob_head = nn.Linear(embed_dim, 1)
 
-    def forward(self, history_intent_embeddings,mode,key_padding_mask=None,gt_intent_sequence=None):
+    def forward(self, history_intent_embeddings,mode,key_padding_mask=None,lane_mask=None):
         """
         Args:
             history_intent_embeddings (torch.Tensor): 编码器输出的历史意图序列。
@@ -793,8 +793,8 @@ class RegressionSegmentDecoder(nn.Module):
         # --- 步骤 3: 准备自回归生成 ---
         # 将所有模态展平到一个批次中，以进行高效的并行计算
         thought_state = initial_state.view(B * self.num_modes, self.embed_dim)
-        # gru_input = torch.zeros_like(thought_state)
-        gru_input = history_intent_embeddings[:, :7, :].mean(dim=1).unsqueeze(1).expand(-1, self.num_modes, -1)
+        gru_input = torch.zeros_like(thought_state)
+        # gru_input = history_intent_embeddings[:, :7, :].mean(dim=1).unsqueeze(1).expand(-1, self.num_modes, -1)
         gru_input = gru_input.reshape(B * self.num_modes, self.embed_dim)
         future_segments = []
 
@@ -805,7 +805,7 @@ class RegressionSegmentDecoder(nn.Module):
             # thought_state = self.attn_layer(gru_input, thought_state, thought_state)[0]
             # b) 规划：决定下一步意图 (路由到专家)
             thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
-            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings[:,-lane_mask.shape[1]:], key_padding_mask=lane_mask)
             rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
             rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
             expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
@@ -900,78 +900,100 @@ class RegressionSegmentDecoder(nn.Module):
 class Regress_refine(RegressionSegmentDecoder):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.intent_queries = nn.Parameter(torch.randn(1, self.num_modes, self.num_segments, self.embed_dim))
-        self.initial_gating = nn.Linear(self.embed_dim, self.num_experts)
         
-    def forward(self, history_intent_embeddings,mode, key_padding_mask=None,gt_intent_sequence=None):
+        self.refine_model = nn.ModuleList(Inter_cross_self_Block(
+                    dim=kwargs.get("embed_dim"),
+                    num_heads=kwargs.get("num_heads"),
+                    mlp_ratio=kwargs.get("mlp_ratio"),
+                    qkv_bias=kwargs.get("qkv_bias"),
+                    drop=0.2,
+                    attn_drop=0.2,
+                    drop_path=0.2,
+                    act_layer=nn.GELU,
+                    norm_layer=nn.LayerNorm,
+                ) for i in range(kwargs.get("query_cross_layers")))
+        self.refine_embed  = nn.Sequential(
+            nn.Linear(kwargs.get("future_len") * 2, kwargs.get("embed_dim")),
+            nn.ReLU(),
+            nn.Linear(kwargs.get("embed_dim"), kwargs.get("embed_dim"))
+        )
+        self.refine_head = nn.Sequential(
+            nn.Linear(kwargs.get("embed_dim"), kwargs.get("future_len") * 2),
+            nn.ReLU(),
+            nn.Linear(kwargs.get("future_len") * 2, kwargs.get("future_len") * 2)
+        )
+
+    def forward(self, history_intent_embeddings,mode,key_padding_mask=None,lane_mask=None):
+        """
+        Args:
+            history_intent_embeddings (torch.Tensor): 编码器输出的历史意图序列。
+                                                      形状: (B, T_hist_segments, D)，例如 (32, 5, 128)
+        """
         B = history_intent_embeddings.shape[0]
 
-        # --- 阶段一: 并行意图规划 ---
-        # (1, K, S, D) -> (B, K, S, D)
-        queries = self.intent_queries.expand(B, -1, -1, -1)
-        # 为高效计算，将 B 和 K 合并: (B*K, S, D)
-        queries_flat = queries.reshape(B * self.num_modes, self.num_segments, self.embed_dim)
+        # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
+        queries = self.mode_queries.expand(B, -1, -1) # (B, K, D)
         
-        # 填充意图占位符
-        planned_intents = queries_flat
         for blk in self.query_init:
-            planned_intents = blk(src=planned_intents, src_kv=history_intent_embeddings.repeat_interleave(self.num_modes, dim=0),
-                                  key_padding_mask=key_padding_mask.repeat_interleave(self.num_modes, dim=0) if key_padding_mask is not None else None)
-        # planned_intents 的形状是 (B*K, S, D)
-
-        # --- 步骤 1.5: 预测全局模态概率 ---
-        global_intent = planned_intents.mean(dim=1).view(B, self.num_modes, self.embed_dim)
-        mode_logits = self.prob_head(global_intent).squeeze(-1) # (B, K)
-
-        # --- 阶段二: 非自回归初步轨迹生成 ---
-        all_intents_flat = planned_intents.reshape(-1, self.embed_dim)
-        expert_logits = self.initial_gating(all_intents_flat)
-        initial_segments_flat = self._moe_execution(all_intents_flat, expert_logits)
-        # (B*K*S, steps*2) -> (B*K, S, steps*2)
-        initial_segments = initial_segments_flat.view(B * self.num_modes, self.num_segments, -1)
-        initial_trajectory = initial_segments.reshape(B * self.num_modes, self.future_len, 2)
-
-        # --- 阶段三: 自回归轨迹优化/微调 ---
-        # 初始化GRU的隐藏状态和输入
-        thought_state = global_intent.reshape(B * self.num_modes, self.embed_dim)
-        gru_input = torch.zeros_like(thought_state) # 初始输入为0
+            initial_state = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
         
-        refined_segments = []
+        initial_state = self.history_norm(initial_state) # (B, K, D)
+
+        # --- 步骤 2: 预测全局模态概率 ---
+        # 基于对历史的初始理解，直接预测每个模态的可能性
+        mode_logits = self.prob_head(initial_state).squeeze(-1) # (B, K)
+        
+        # --- 步骤 3: 准备自回归生成 ---
+        # 将所有模态展平到一个批次中，以进行高效的并行计算
+        thought_state = initial_state.view(B * self.num_modes, self.embed_dim)
+        gru_input = torch.zeros_like(thought_state)
+        # gru_input = history_intent_embeddings[:, :7, :].mean(dim=1).unsqueeze(1).expand(-1, self.num_modes, -1)
+        gru_input = gru_input.reshape(B * self.num_modes, self.embed_dim)
+        future_segments = []
+
+        # --- 步骤 4: 自回归循环 ---
         for i in range(self.num_segments):
-            # a) 准备输入: 结合初步轨迹的编码
-            current_segment_embed = self.segment_embedder(initial_segments[:, i, :])
-            # 将初步结果和上一步的输出结合起来作为GRU输入
-            gru_input = gru_input + current_segment_embed
-
-            # b) 更新状态并查询全局上下文
+            # a) 更新思考状态
             thought_state = self.gru_cell(gru_input, thought_state)
+            # thought_state = self.attn_layer(gru_input, thought_state, thought_state)[0]
+            # b) 规划：决定下一步意图 (路由到专家)
             thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
-            context_output = self.query_attn[i](src=thought_state_q, 
-                                                        src_kv=history_intent_embeddings, 
-                                                        key_padding_mask=key_padding_mask)
-            rich_thought_state = self.context_norm(thought_state_q + context_output)
+            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings[:,-lane_mask.shape[1]:], key_padding_mask=lane_mask)
+            rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
             rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
+            expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
             
-            # c) MoE预测修正量 (Residual)
-            expert_logits_refine = self.gating_network(rich_thought_state)
-            residual_segment = self._moe_execution(rich_thought_state, expert_logits_refine)
+            segment_output_flat = self._moe_execution(rich_thought_state, expert_logits)
+            future_segments.append(segment_output_flat)
             
-            # d) 更新轨迹段: 将修正量加到初步预测上
-            refined_segment = initial_segments[:, i, :] + residual_segment
-            refined_segments.append(refined_segment)
-            
-            # e) 准备下一次循环的输入: 编码优化后的结果
-            gru_input = self.segment_embedder(refined_segment)
+            # d) 更新：将生成的轨迹段编码，作为下一次GRU的输入
+            gru_input = self.segment_embedder(segment_output_flat)
 
-        # --- 步骤 5: 拼接和整理最终输出 ---
-        stacked_segments = torch.stack(refined_segments, dim=1) # (B*K, S, steps*2)
-        trajectories_flat = stacked_segments.reshape(B * self.num_modes, self.future_len, 2)
+        # --- 步骤 5: 拼接和整理输出 ---
+        # 将分段列表堆叠起来
+        # List[(B*K, steps*2)] -> (S, B*K, steps*2)
+        stacked_segments = torch.stack(future_segments, dim=0)
+        
+        # 调整形状为最终轨迹格式
+        # (S, B*K, steps*2) -> (B*K, S, steps*2) -> (B*K, T, 2)
+        trajectories_flat = stacked_segments.permute(1, 0, 2).reshape(
+            B * self.num_modes, self.future_len, 2
+        )
+        
+        # (B*K, T, 2) -> (B, K, T, 2)
         final_predictions = trajectories_flat.view(B, self.num_modes, self.future_len, 2)
+        refine_embed = self.refine_embed(final_predictions.reshape(B, self.num_modes, self.future_len*2))
+        for blk in self.refine_model:
+            refine_embed = blk(src=refine_embed,src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+
+        refine = self.refine_head(refine_embed).view(B, self.num_modes, self.future_len, 2)
+
+
 
         return {
-            "predictions": final_predictions,
-            "initial_predictions": initial_trajectory.view(B, self.num_modes, self.future_len, 2), # (可选)
-            "logits": mode_logits,
+            "predictions": final_predictions, # (B, K, T, 2)
+            "refine": refine, # (B, K, T, 2)
+            "logits": mode_logits,            # (B, K)
             "probs": F.softmax(mode_logits, dim=-1)
         }
     
