@@ -274,14 +274,16 @@ class RegLightningModule(BaseLightningModule):
         _, loss_dict = self.cal_loss(out, data)
         metrics = self.metrics(out, data['target'][:, 0])
 
-        self.log(
-            'val/reg_loss',
-            loss_dict['reg_loss'],
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            sync_dist=True,
-        )
+        
+        for k, v in loss_dict.items():
+            self.log(
+                f'val/{k}',
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
         self.log_dict(
             metrics,
             prog_bar=True,

@@ -1,7 +1,7 @@
-tag: MoeMotion_moe_regres
+tag: MoeMotion_moe_regres_refine
 
 pl_module:
-  _target_: realmotion.model.pl_modules.BaseLightningModule
+  _target_: realmotion.model.pl_modules.RegLightningModule
   model:
     _target_: realmotion.model.moemotion.MoeMotion
     embed_dim: 128
@@ -17,7 +17,7 @@ pl_module:
     mlp_drop: 0.0
     moe: True
     his_embed_moe: [True, True, True, True]
-    moe_type: "intent_regre"
+    moe_type: "intent_regre_refine"
     query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1

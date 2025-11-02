@@ -924,64 +924,12 @@ class Regress_refine(RegressionSegmentDecoder):
         )
 
     def forward(self, history_intent_embeddings,mode,key_padding_mask=None,lane_mask=None):
-        """
-        Args:
-            history_intent_embeddings (torch.Tensor): 编码器输出的历史意图序列。
-                                                      形状: (B, T_hist_segments, D)，例如 (32, 5, 128)
-        """
-        B = history_intent_embeddings.shape[0]
-
-        # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
-        queries = self.mode_queries.expand(B, -1, -1) # (B, K, D)
         
-        for blk in self.query_init:
-            initial_state = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
-        
-        initial_state = self.history_norm(initial_state) # (B, K, D)
-
-        # --- 步骤 2: 预测全局模态概率 ---
-        # 基于对历史的初始理解，直接预测每个模态的可能性
-        mode_logits = self.prob_head(initial_state).squeeze(-1) # (B, K)
-        
-        # --- 步骤 3: 准备自回归生成 ---
-        # 将所有模态展平到一个批次中，以进行高效的并行计算
-        thought_state = initial_state.view(B * self.num_modes, self.embed_dim)
-        gru_input = torch.zeros_like(thought_state)
-        # gru_input = history_intent_embeddings[:, :7, :].mean(dim=1).unsqueeze(1).expand(-1, self.num_modes, -1)
-        gru_input = gru_input.reshape(B * self.num_modes, self.embed_dim)
-        future_segments = []
-
-        # --- 步骤 4: 自回归循环 ---
-        for i in range(self.num_segments):
-            # a) 更新思考状态
-            thought_state = self.gru_cell(gru_input, thought_state)
-            # thought_state = self.attn_layer(gru_input, thought_state, thought_state)[0]
-            # b) 规划：决定下一步意图 (路由到专家)
-            thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
-            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings[:,-lane_mask.shape[1]:], key_padding_mask=lane_mask)
-            rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
-            rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
-            expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
-            
-            segment_output_flat = self._moe_execution(rich_thought_state, expert_logits)
-            future_segments.append(segment_output_flat)
-            
-            # d) 更新：将生成的轨迹段编码，作为下一次GRU的输入
-            gru_input = self.segment_embedder(segment_output_flat)
-
-        # --- 步骤 5: 拼接和整理输出 ---
-        # 将分段列表堆叠起来
-        # List[(B*K, steps*2)] -> (S, B*K, steps*2)
-        stacked_segments = torch.stack(future_segments, dim=0)
-        
-        # 调整形状为最终轨迹格式
-        # (S, B*K, steps*2) -> (B*K, S, steps*2) -> (B*K, T, 2)
-        trajectories_flat = stacked_segments.permute(1, 0, 2).reshape(
-            B * self.num_modes, self.future_len, 2
-        )
-        
+        out = super().forward(history_intent_embeddings,mode,key_padding_mask,lane_mask)
         # (B*K, T, 2) -> (B, K, T, 2)
-        final_predictions = trajectories_flat.view(B, self.num_modes, self.future_len, 2)
+
+        final_predictions = out['predictions']
+        B = final_predictions.shape[0]
         refine_embed = self.refine_embed(final_predictions.reshape(B, self.num_modes, self.future_len*2))
         for blk in self.refine_model:
             refine_embed = blk(src=refine_embed,src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
@@ -991,8 +939,8 @@ class Regress_refine(RegressionSegmentDecoder):
         return {
             "predictions": refine, # (B, K, T, 2)
             "propose": final_predictions, # (B, K, T, 2)
-            "logits": mode_logits,            # (B, K)
-            "probs": F.softmax(mode_logits, dim=-1)
+            "logits": out['logits'],            # (B, K)
+            "probs": out['probs']
         }
     
 class Regress_refine_v2(Regress_refine):
