@@ -46,7 +46,7 @@ output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
 gpus: 1
 batch_size: 32
-epochs: 60
+epochs: 80
 checkpoint: 
 submit:
 n_step: 20
