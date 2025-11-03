@@ -1238,7 +1238,7 @@ class QuerrySegmentDecoder(nn.Module):
                     drop_path=drop_path,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                ) for i in range(self.num_segments))
+                ) for i in range(query_cross_layers))
 
         self.query_intent_mode_dense =nn.ModuleList(Inter_cross_self_Block(
                     dim=embed_dim,
@@ -1250,7 +1250,7 @@ class QuerrySegmentDecoder(nn.Module):
                     drop_path=drop_path,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                ) for i in range(self.num_segments))
+                ) for i in range(query_cross_layers))
         self.query_intent_mode_self =nn.ModuleList(Block(
                     dim=embed_dim,
                     num_heads=num_heads,
@@ -1261,7 +1261,7 @@ class QuerrySegmentDecoder(nn.Module):
                     drop_path=drop_path,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                ) for i in range(self.num_segments))
+                ) for i in range(query_cross_layers))
 
         self.gating_network = nn.Linear(embed_dim, num_experts)
         

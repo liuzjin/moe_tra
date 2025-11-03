@@ -29,7 +29,7 @@ pl_module:
     his_num_heads: [2, 4, 8, 16]
     out_indices: [0, 1, 2, 3]
   optim:
-    lr: 2.5e-3
+    lr: 2e-3
     weight_decay: 1e-2
     min_lr: 1e-5
     epochs: ${epochs}

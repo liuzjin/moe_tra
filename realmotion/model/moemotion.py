@@ -46,7 +46,7 @@ class MoeMotion(nn.Module):
         self.future_len = future_len
         self.future_seg =  future_len// future_steps
         
-        self.hist_embed = AgentEmbeddingLayer_light(
+        self.hist_embed = AgentEmbeddingLayer(
             6, embed_dim // 8, drop_path_rate=drop_path,
             kernel_size=kernel_size,depths=depths,num_heads=his_num_heads,
             out_indices=out_indices,moe=his_embed_moe
