@@ -1326,8 +1326,8 @@ class QuerrySegmentDecoder(nn.Module):
 
         return {
             "predictions": final_predictions, # (B, K, T, 2)
-            "logits": mode_logits,            # (B, K)
-            "probs": F.softmax(mode_logits, dim=-1),
+            "pi": mode_logits,            # (B, K)
+            "segment_logits_per_mode": expert_logits,
             "states": mode
         }
     def _moe_execution(self, state: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
