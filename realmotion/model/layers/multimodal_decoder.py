@@ -1216,7 +1216,19 @@ class QuerrySegmentDecoder(nn.Module):
         # self.history_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.history_norm = nn.LayerNorm(embed_dim)
         self.intent_norm = nn.LayerNorm(embed_dim)
-        self.query_mode =nn.ModuleList(Inter_cross_self_Block(
+        self.query_mode =nn.ModuleList(InterBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
+        
+        self.query_mode_self =nn.ModuleList(Block(
                     dim=embed_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
@@ -1228,7 +1240,19 @@ class QuerrySegmentDecoder(nn.Module):
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
 
-        self.query_intent =nn.ModuleList(Inter_cross_self_Block(
+        self.query_intent =nn.ModuleList(InterBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
+        
+        self.query_intent_self =nn.ModuleList(Block(
                     dim=embed_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
@@ -1240,7 +1264,7 @@ class QuerrySegmentDecoder(nn.Module):
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
 
-        self.query_intent_mode_dense =nn.ModuleList(Inter_cross_self_Block(
+        self.query_intent_mode_dense =nn.ModuleList(InterBlock(
                     dim=embed_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
@@ -1293,6 +1317,8 @@ class QuerrySegmentDecoder(nn.Module):
         
         for blk in self.query_mode:
             mode = blk(src=mode, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+        for blk in self.query_mode_self:
+            mode = blk(src=mode)
 
         mode = self.history_norm(mode) # (B, K, D)
 
@@ -1304,6 +1330,8 @@ class QuerrySegmentDecoder(nn.Module):
 
         for blk in self.query_intent:
             intent = blk(src=intent, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+        for blk in self.query_intent_self:
+            intent = blk(src=intent)
         
         intent = self.intent_norm(intent)
 
