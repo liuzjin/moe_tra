@@ -1273,7 +1273,12 @@ class QuerrySegmentDecoder(nn.Module):
 
         # --- 3. 最终输出模块 ---
         # 预测每个模态的概率
-        self.prob_head = nn.Linear(embed_dim, 1)
+        self.prob_head = nn.Sequential(
+            nn.Linear(embed_dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 1),
+        )
+
 
     def forward(self, history_intent_embeddings,mode,key_padding_mask=None,lane_mask=None):
         """
@@ -1288,7 +1293,7 @@ class QuerrySegmentDecoder(nn.Module):
         
         for blk in self.query_mode:
             mode = blk(src=mode, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
-        
+
         mode = self.history_norm(mode) # (B, K, D)
 
         # --- 步骤 2: 预测全局模态概率 ---

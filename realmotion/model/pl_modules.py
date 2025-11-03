@@ -430,7 +430,7 @@ class MoeLightningModule(BaseLightningModule):
         y_hat_others = out.get('y_hat_others')       # 其他智能体的预测
         mode_logits = out['y_hat']['pi']                  # (B, K) - 全局模态概率
         segment_logits_per_mode = out['y_hat']['segment_logits_per_mode'] # (B, K, S, N) - 分段意图logits
-        
+
         # --- 3. 计算核心损失 ---
 
         # a) 多模态回归损失 (Oracle Loss)
@@ -497,17 +497,12 @@ class MoeLightningModule(BaseLightningModule):
         aux_weight = 1.0
         o_weight = 1.0 # 其他智能体的损失权重
 
-        velocity = predictions[:, :, :-1] - predictions[:, :, 1:]
-        acceleration = velocity[:, :, :-1] - velocity[:, :, 1:]
-        jerk_loss = torch.mean(torch.norm(acceleration, p=2, dim=-1).mean(dim=-1))
-        jerk_weight = 0.01
         
         total_loss = (regression_loss + 
                     g_weight_mode * mode_gating_loss + 
                     g_weight_segment * segment_gating_loss +
                     aux_weight * aux_loss +
-                    o_weight * others_reg_loss+
-                    jerk_weight * jerk_loss)
+                    o_weight * others_reg_loss)
         
         # --- 5. 构建日志字典 ---
         loss_dict = {
@@ -517,6 +512,7 @@ class MoeLightningModule(BaseLightningModule):
             'segment_gating_loss': segment_gating_loss.item(),
             'others_reg_loss': others_reg_loss.item(),
         }
+
         return total_loss, loss_dict
     
     def training_step(self, data, batch_idx):
