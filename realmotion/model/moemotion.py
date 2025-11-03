@@ -34,14 +34,27 @@ class MoeMotion(nn.Module):
         top_k=2,
         intent_label=True,
         attn_moe_mlp=False,
-        modes=6
+        modes=6,
+        kernel_size=[3, 3, 5, 5],
+        depths=[2, 2, 2, 2],
+        his_num_heads=[2, 4, 8, 16],
+        out_indices=[0, 1, 2, 3],
     ) -> None:
         super().__init__()
+
+        self.future_steps = future_steps
+        self.future_len = future_len
+        self.future_seg =  future_len// future_steps
         
         self.hist_embed = AgentEmbeddingLayer_light(
-            6, embed_dim // 8, drop_path_rate=drop_path,moe=his_embed_moe,
+            6, embed_dim // 8, drop_path_rate=drop_path,
+            kernel_size=kernel_size,depths=depths,num_heads=his_num_heads,
+            out_indices=out_indices,moe=his_embed_moe
         )
-        self.num_segments = 7
+        if history_len == 50:
+            self.num_segments = 7
+        elif history_len == 30:
+            self.num_segments = 4
         self.segment_pos_embed = nn.Parameter(
             torch.randn(1, 1, self.num_segments, embed_dim)
         )
@@ -261,6 +274,7 @@ class MoeMotion(nn.Module):
 
         if self.moe:
             y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask, lane_mask=~data['lane_key_valid_mask'])
+            x_mode = y_hat['states']
         else:
             x_agent = x_encoder[:, :segment]
             y_hat = self.decoder(x_agent)
@@ -283,24 +297,44 @@ class MoeMotion(nn.Module):
                 memory_traj_ori = torch.gather(memory_y_hat, 2, ori_idx.reshape(
                     B, 1, -1, 1).repeat(1, memory_y_hat.size(1), 1, memory_y_hat.size(-1)))
                 memory_y_hat = torch.bmm(
-                    (memory_y_hat - memory_traj_ori).reshape(B, -1, 2).double(), rot_mat
-                ).reshape(B, memory_y_hat.size(1), -1, 2).to(torch.float32)
-                
-                traj_embed = self.traj_embed(y_hat.detach().reshape(B, y_hat.size(1), -1))
+                    (memory_y_hat - memory_traj_ori).reshape(B, -1, 2), rot_mat
+                ).reshape(B, memory_y_hat.size(1), -1, 2)
+                predictions = y_hat['predictions'].detach()
+                B, mode, n, d = predictions.shape
+                predictions = predictions.reshape(B, mode,self.future_seg, -1, d)
+                predictions = predictions.reshape(B, mode*self.future_seg, -1, d)
+                memory_y_hat = memory_y_hat.reshape(B, mode,self.future_seg, -1, d)
+                memory_y_hat = memory_y_hat.reshape(B, mode*self.future_seg, -1, d)
+                traj_embed = self.traj_embed(predictions.reshape(B, predictions.size(1), -1))
                 memory_traj_embed = self.traj_embed(memory_y_hat.reshape(B, memory_y_hat.size(1), -1))
                 
                 for modfus in self.mode_fusion:
                     x_mode = modfus(x_mode, memory_x_mode, cur_pose, memory_pose,
                                     cur_pos_embed=traj_embed,
                                     memory_pos_embed=memory_traj_embed)
-                y_hat_diff = self.stream_loc(x_mode).reshape(B, y_hat.size(1), -1, 2)
-                y_hat = y_hat + y_hat_diff
+                y_hat_diff = self.stream_loc(x_mode).reshape(B, mode*self.future_seg, -1, 2).reshape(B, mode,self.future_seg, -1, 2)
+                y_hat_diff = y_hat_diff.reshape(B, mode, -1, 2)
+                y_hat['predictions'] = y_hat['predictions'] + y_hat_diff
         
         
         ret_dict = {
             'y_hat': y_hat,
             'y_hat_others': y_hat_others,
         }
+        if isinstance(self, StreamModelForecast):
+            glo_y_hat = torch.bmm(y_hat['predictions'].detach().reshape(B, -1, 2), torch.inverse(rot_mat))
+            glo_y_hat = glo_y_hat.reshape(B, y_hat['predictions'].size(1), -1, 2)
+
+            memory_dict = {
+                "x_encoder": x_encoder,
+                "x_mode": x_mode,
+                "glo_y_hat": glo_y_hat,
+                "x_mask": key_valid_mask,
+                "origin": data["origin"],
+                "theta": data["theta"],
+                "timestamp": data["timestamp"],
+            }
+            ret_dict["memory_dict"] = memory_dict
         return ret_dict
 
 class StreamModelForecast(MoeMotion):
@@ -315,7 +349,7 @@ class StreamModelForecast(MoeMotion):
         self.pose_dim = 4
         if self.use_stream_encoder:
             self.interaction = nn.ModuleList(
-                InteractionBlock(
+                InteractionModule(
                     dim=kwargs["embed_dim"],
                     pose_dim=self.pose_dim,
                     num_heads=kwargs["num_heads"],
@@ -327,7 +361,7 @@ class StreamModelForecast(MoeMotion):
             )
         if self.use_stream_decoder:
             self.mode_fusion = nn.ModuleList(
-                InteractionBlock(
+                InteractionModule(
                     dim=kwargs["embed_dim"],
                     pose_dim=self.pose_dim,
                     num_heads=kwargs["num_heads"],

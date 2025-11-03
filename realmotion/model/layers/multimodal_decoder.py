@@ -797,7 +797,7 @@ class RegressionSegmentDecoder(nn.Module):
         # gru_input = history_intent_embeddings[:, :7, :].mean(dim=1).unsqueeze(1).expand(-1, self.num_modes, -1)
         gru_input = gru_input.reshape(B * self.num_modes, self.embed_dim)
         future_segments = []
-
+        states = []
         # --- 步骤 4: 自回归循环 ---
         for i in range(self.num_segments):
             # a) 更新思考状态
@@ -807,6 +807,7 @@ class RegressionSegmentDecoder(nn.Module):
             thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
             context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings[:,-lane_mask.shape[1]:], key_padding_mask=lane_mask)
             rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
+            states.append(rich_thought_state)
             rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
             expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
             
@@ -829,11 +830,13 @@ class RegressionSegmentDecoder(nn.Module):
         
         # (B*K, T, 2) -> (B, K, T, 2)
         final_predictions = trajectories_flat.view(B, self.num_modes, self.future_len, 2)
-
+        states = torch.stack(states, dim=1)
+        states = states.reshape(B, -1, self.embed_dim)
         return {
             "predictions": final_predictions, # (B, K, T, 2)
             "logits": mode_logits,            # (B, K)
-            "probs": F.softmax(mode_logits, dim=-1)
+            "probs": F.softmax(mode_logits, dim=-1),
+            "states": states
         }
     def _moe_execution(self, state: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         """

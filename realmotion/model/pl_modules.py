@@ -311,7 +311,7 @@ class StreamLightningModule(BaseLightningModule):
             for i in range(num_no_grad_frames):
                 cur_data = data[i]
                 cur_data['memory_dict'] = memory_dict
-                out = self(cur_data)
+                out = self(cur_data, False)
                 memory_dict = out['memory_dict']
         
         self.train()
@@ -320,7 +320,9 @@ class StreamLightningModule(BaseLightningModule):
         for i in range(num_grad_frames):
             cur_data = data[i + num_no_grad_frames]
             cur_data['memory_dict'] = memory_dict
-            out = self(cur_data)
+            out = self(cur_data, True)
+            out['pi'] = out['y_hat']['logits']
+            out['y_hat'] = out['y_hat']['predictions']
             cur_loss, cur_loss_dict = self.cal_loss(out, cur_data, tag=f'step{i + num_no_grad_frames}_')
             loss_dict.update(cur_loss_dict)
             sum_loss += cur_loss
@@ -344,7 +346,9 @@ class StreamLightningModule(BaseLightningModule):
         for i in range(len(data)):
             cur_data = data[i]
             cur_data['memory_dict'] = memory_dict
-            out = self(cur_data)
+            out = self(cur_data, False)
+            out['pi'] = out['y_hat']['logits']
+            out['y_hat'] = out['y_hat']['predictions']
             _, cur_loss_dict = self.cal_loss(out, cur_data, tag=f'step{i}_')
             reg_loss_dict[f'val/step{i}_reg_loss'] = cur_loss_dict[f'step{i}_reg_loss']
             memory_dict = out['memory_dict']
@@ -520,6 +524,8 @@ class MoeLightningModule(BaseLightningModule):
         return total_loss, loss_dict
     
     def training_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
         self.train()
         out = self(data, True)
         loss, loss_dict = self.cal_loss(out,data)
@@ -586,6 +592,8 @@ class MoeLightningModule(BaseLightningModule):
         
         return total_loss, loss_dict
     def validation_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
         self.eval()
         out = self(data, False)
         

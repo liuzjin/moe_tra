@@ -17,7 +17,7 @@ class Av2Dataset(Dataset):
         n_step: int = 10,
         logger=None,
     ):
-        # assert split_points[-1] == 50 and num_historical_steps <= 50
+        assert split_points[-1] == 50 and num_historical_steps <= 50
         assert split in ['train', 'val', 'test']
         super(Av2Dataset, self).__init__()
         self.data_folder = Path(data_root) / split
@@ -28,7 +28,7 @@ class Av2Dataset(Dataset):
         self.num_future_steps = 0 if split =='test' else 60
         self.radius = radius
         self.map_radius = map_radius
-    
+        self.split_points = split_points
 
         if logger is not None:
             logger.info(f'data root: {data_root}/{split}, total number of files: {len(self.file_list)}')
@@ -42,8 +42,13 @@ class Av2Dataset(Dataset):
         return data
     
     def process(self, data):
-        ag_dict = self.process_single_agent(data)
-        return ag_dict
+        sequence_data = []
+        for cur_step in self.split_points:
+            ag_dict = self.process_single_agent(data,cur_step)
+            sequence_data.append(ag_dict)
+        return sequence_data
+
+
 
     def resample_intent_labels(self,
         intent_sequence, 
@@ -126,8 +131,7 @@ class Av2Dataset(Dataset):
         # 将结果列表转换为张量，并确保它在原始设备上
         return torch.tensor(batch_results, dtype=torch.long, device=intent_sequence.device)
 
-    def process_single_agent(self, data):
-        step = self.num_historical_steps
+    def process_single_agent(self, data, step):
         idx = data['focal_idx']
         cur_agent_id = data['agent_ids'][idx]
         origin = data['x_positions'][idx, step - 1]
@@ -279,73 +283,76 @@ class Av2Dataset(Dataset):
         }
 
     
-def collate_fn(batch):
+def collate_fn(seq_batch):
     """
     处理批次数据，每条数据是一个字典（而非列表）
     对具有不同维度的张量进行填充以形成批次
     """
-    data = {}
-    
-    # 需要使用 pad_sequence 填充的字段
-    padded_fields = [
-        'x_positions_diff',
-        'x_attr',
-        'x_positions',
-        'x_centers',
-        'x_angles',
-        'x_velocity',
-        'x_velocity_diff',
-        'lane_positions',
-        'lane_centers',
-        'lane_angles',
-        'lane_attr',
-        'is_intersections',
-    ]
-    
-    # 对需要填充的字段进行批处理
-    for key in padded_fields:
-        if key in batch[0]:
-            data[key] = pad_sequence([b[key] for b in batch], batch_first=True)
-    
-    # 处理可选字段 x_scored
-    if 'x_scored' in batch[0]:
-        data['x_scored'] = pad_sequence(
-            [b['x_scored'] for b in batch], batch_first=True
-        )
-    
-    # 处理目标相关字段
-    if batch[0]['target'] is not None:
-        data['target'] = pad_sequence([b['target'] for b in batch], batch_first=True)
-        data['target_mask'] = pad_sequence(
-            [b['target_mask'] for b in batch], batch_first=True, padding_value=False
-        )
-    
-    # 处理掩码字段
-    mask_fields = ['x_valid_mask', 'lane_valid_mask']
-    for key in mask_fields:
-        if key in batch[0]:
-            data[key] = pad_sequence(
-                [b[key] for b in batch], batch_first=True, padding_value=False
+    seq_data = []
+    for i in range(len(seq_batch[0])):
+        batch = [b[i] for b in seq_batch]
+        data = {}
+        
+        # 需要使用 pad_sequence 填充的字段
+        padded_fields = [
+            'x_positions_diff',
+            'x_attr',
+            'x_positions',
+            'x_centers',
+            'x_angles',
+            'x_velocity',
+            'x_velocity_diff',
+            'lane_positions',
+            'lane_centers',
+            'lane_angles',
+            'lane_attr',
+            'is_intersections',
+        ]
+        
+        # 对需要填充的字段进行批处理
+        for key in padded_fields:
+            if key in batch[0]:
+                data[key] = pad_sequence([b[key] for b in batch], batch_first=True)
+        
+        # 处理可选字段 x_scored
+        if 'x_scored' in batch[0]:
+            data['x_scored'] = pad_sequence(
+                [b['x_scored'] for b in batch], batch_first=True
             )
-    
-    # 计算关键有效掩码
-    if 'x_valid_mask' in data:
-        data['x_key_valid_mask'] = data['x_valid_mask'].any(-1)
-    if 'lane_valid_mask' in data:
-        data['lane_key_valid_mask'] = data['lane_valid_mask'].any(-1)
-    
-    # 处理非张量字段
-    data['scenario_id'] = [b['scenario_id'] for b in batch]
-    data['track_id'] = [b['track_id'] for b in batch]
-    data['city'] = [b['city'] for b in batch]
-    
-    # 合并张量字段
-    data['origin'] = torch.cat([b['origin'] for b in batch], dim=0)
-    data['theta'] = torch.cat([b['theta'] for b in batch])
-    data['timestamp'] = torch.cat([b['timestamp'] for b in batch])
-    
-    # 处理驾驶意图
-    if batch[0]['target'] is not None and 'driving_intent' in batch[0]:
-        data['intent'] = pad_sequence([b['driving_intent'] for b in batch], batch_first=True)
-    
-    return data
+        
+        # 处理目标相关字段
+        if batch[0]['target'] is not None:
+            data['target'] = pad_sequence([b['target'] for b in batch], batch_first=True)
+            data['target_mask'] = pad_sequence(
+                [b['target_mask'] for b in batch], batch_first=True, padding_value=False
+            )
+        
+        # 处理掩码字段
+        mask_fields = ['x_valid_mask', 'lane_valid_mask']
+        for key in mask_fields:
+            if key in batch[0]:
+                data[key] = pad_sequence(
+                    [b[key] for b in batch], batch_first=True, padding_value=False
+                )
+        
+        # 计算关键有效掩码
+        if 'x_valid_mask' in data:
+            data['x_key_valid_mask'] = data['x_valid_mask'].any(-1)
+        if 'lane_valid_mask' in data:
+            data['lane_key_valid_mask'] = data['lane_valid_mask'].any(-1)
+        
+        # 处理非张量字段
+        data['scenario_id'] = [b['scenario_id'] for b in batch]
+        data['track_id'] = [b['track_id'] for b in batch]
+        data['city'] = [b['city'] for b in batch]
+        
+        # 合并张量字段
+        data['origin'] = torch.cat([b['origin'] for b in batch], dim=0)
+        data['theta'] = torch.cat([b['theta'] for b in batch])
+        data['timestamp'] = torch.cat([b['timestamp'] for b in batch])
+        
+        # 处理驾驶意图
+        if batch[0]['target'] is not None and 'driving_intent' in batch[0]:
+            data['intent'] = pad_sequence([b['driving_intent'] for b in batch], batch_first=True)
+        seq_data.append(data)
+    return seq_data

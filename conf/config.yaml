@@ -8,10 +8,16 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_I
 
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_moe_regres
+
 defaults:
   - _self_
-  - datamodule: av2_moe
-  - model: MoeMotion_moe_regres
+  - datamodule: av2_moes_stream
+  - model: MoeMotion_moe_regres_stream
+
 
 # defaults:
 #   - _self_
@@ -38,7 +44,7 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 8
+gpus: 1
 batch_size: 16
 epochs: 80
 checkpoint: 
@@ -47,7 +53,7 @@ n_step: 30
 top_k: 2
 num_experts: 8
 future_len: 60
-history_len: 50
+history_len: 30
 intent_label: False
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint

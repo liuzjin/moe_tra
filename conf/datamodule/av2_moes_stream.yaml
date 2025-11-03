@@ -10,8 +10,8 @@ pl_module:
   num_workers: 24
   pin_memory: True
   dataset:
-    num_historical_steps: 50
-    split_points:
+    num_historical_steps: 30
+    split_points: [30, 40, 50]
     n_step: ${n_step}
     radius: 150.0
     map_radius: 150.0
