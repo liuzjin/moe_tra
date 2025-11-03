@@ -465,13 +465,10 @@ class MoeLightningModule(BaseLightningModule):
             if gt_intent_seq is not None:
                 # 从 (B, K, S, N) 的分段logits中，只选出那个被认定为最优模态的logits
                 # 使用 gather 高效地选取
-                indices_for_gather = best_mode_indices.view(-1, 1, 1, 1).expand(
-                    -1, 1, self.n, self.num_experts
-                )
-                # best_segment_logits: (B, 1, S, N) -> (B, S, N)
-                best_segment_logits = torch.gather(segment_logits_per_mode, 1, indices_for_gather).squeeze(1)
-
+                segment_logits_per_mode = segment_logits_per_mode.reshape(predictions.shape[0], predictions.shape[1], -1,segment_logits_per_mode.shape[-1] )
+                best_segment_logits = segment_logits_per_mode.gather(1, best_mode_indices.view(predictions.shape[0], 1, 1, 1).expand(predictions.shape[0], 1, gt_intent_seq.shape[-1], self.num_experts))
                 # 计算交叉熵损失
+    
                 segment_gating_loss = F.cross_entropy(
                     best_segment_logits.reshape(-1, self.num_experts), 
                     gt_intent_seq.reshape(-1)

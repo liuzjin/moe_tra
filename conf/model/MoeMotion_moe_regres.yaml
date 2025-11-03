@@ -3,6 +3,7 @@ tag: MoeMotion_moe_regres
 pl_module:
   _target_: realmotion.model.pl_modules.MoeLightningModule
   intent_label: ${intent_label}
+  num_experts: ${num_experts}
   model:
     _target_: realmotion.model.moemotion.MoeMotion
     embed_dim: 128
