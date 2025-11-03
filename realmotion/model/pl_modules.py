@@ -412,8 +412,7 @@ class MoeLightningModule(BaseLightningModule):
                 'minFDE1': minFDE(k=1),
                 'minFDE6': minFDE(k=6),
                 'MR': MR(),
-                'b-minFDE6': brier_minFDE(k=6),
-                'IntentAcc': CustomAccuracy()
+                'b-minFDE6': brier_minFDE(k=6)
             }
         )
     
@@ -459,7 +458,7 @@ class MoeLightningModule(BaseLightningModule):
         # c) 分段意图分类损失 (Gating Loss for Segments)
         segment_gating_loss = torch.tensor(0.0, device=gt_traj.device)
         # 只在训练时、且开启了意图标签模式、且数据中真的有标签时，才计算
-        if self.training and self.intent_label and 'intent' in data:
+        if self.intent_label and 'intent' in data:
             gt_intent_seq = data.get('intent') # (B, S)
             gt_intent_seq = gt_intent_seq[:, 0, :]
             if gt_intent_seq is not None:
@@ -494,7 +493,7 @@ class MoeLightningModule(BaseLightningModule):
         # --- 4. 计算总损失 ---
         # 权重 g_weight_mode, g_weight_segment, o_weight 是需要调整的超参数
         g_weight_mode = 1.0
-        g_weight_segment = 0.5
+        g_weight_segment = 1.0
         aux_weight = 1.0
         o_weight = 1.0 # 其他智能体的损失权重
 
@@ -596,23 +595,16 @@ class MoeLightningModule(BaseLightningModule):
         
         # --- 2. 计算并记录验证损失 ---
         # 调用下面新写的 cal_eval_loss
-        loss, loss_dict = self.cal_eval_loss(out, data)
+        loss, loss_dict = self.cal_loss(out, data)
         
         # 添加 stage 前缀 (val/ or test/) 并记录
-        self.log_dict({f"{k}": v for k, v in loss_dict.items()}, 
+        self.log_dict({f"val/{k}": v for k, v in loss_dict.items()}, 
                     on_step=False, on_epoch=True, sync_dist=True)
-        mode_logits = out['y_hat']['pi']      # (B, K)
-        _, top1_indices = torch.max(mode_logits, dim=-1)
-        segment_logits_per_mode = out['y_hat']['segment_logits_per_mode'] # (B, K, S, N)
-        top1_segment_logits = segment_logits_per_mode[torch.arange(out['y_hat']['predictions'].shape[0]), top1_indices] # (B, S, N)
-        pred_intent_seq = torch.argmax(top1_segment_logits, dim=-1) # (B, S)
-                
+
         out = {
             'y_hat': out['y_hat']['predictions'],
             'pi': out['y_hat']['pi'],
             'y_hat_others': out['y_hat_others'],
-            'intent': pred_intent_seq,
-            'intent_target': data['intent'][:, 0],
         }
         metrics = self.metrics(out, data['target'][:, 0])
         self.log_dict(
