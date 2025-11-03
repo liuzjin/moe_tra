@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
+from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
 from .layers.transformer_blocks import Block, InterBlock, InteractionModule
 
 
@@ -135,6 +135,20 @@ class MoeMotion(nn.Module):
                     )
             elif moe_type == "intent_regre_refine":
                 self.decoder = Regress_refine(
+                    embed_dim=embed_dim,
+                    num_modes=modes,
+                    future_len=future_len,
+                    future_steps=future_steps,
+                    num_experts=num_experts,
+                    top_k=top_k,
+                    num_heads= 8,
+                    mlp_ratio = mlp_ratio,
+                    qkv_bias = qkv_bias,
+                    mlp_drop=mlp_drop,
+                    query_cross_layers=query_cross_layers,
+                    )
+            elif moe_type == "intent_query":
+                self.decoder = QuerrySegmentDecoder(
                     embed_dim=embed_dim,
                     num_modes=modes,
                     future_len=future_len,
@@ -300,11 +314,6 @@ class MoeMotion(nn.Module):
                     (memory_y_hat - memory_traj_ori).reshape(B, -1, 2), rot_mat
                 ).reshape(B, memory_y_hat.size(1), -1, 2)
                 predictions = y_hat['predictions'].detach()
-                B, mode, n, d = predictions.shape
-                predictions = predictions.reshape(B, mode,self.future_seg, -1, d)
-                predictions = predictions.reshape(B, mode*self.future_seg, -1, d)
-                memory_y_hat = memory_y_hat.reshape(B, mode,self.future_seg, -1, d)
-                memory_y_hat = memory_y_hat.reshape(B, mode*self.future_seg, -1, d)
                 traj_embed = self.traj_embed(predictions.reshape(B, predictions.size(1), -1))
                 memory_traj_embed = self.traj_embed(memory_y_hat.reshape(B, memory_y_hat.size(1), -1))
                 
@@ -312,8 +321,7 @@ class MoeMotion(nn.Module):
                     x_mode = modfus(x_mode, memory_x_mode, cur_pose, memory_pose,
                                     cur_pos_embed=traj_embed,
                                     memory_pos_embed=memory_traj_embed)
-                y_hat_diff = self.stream_loc(x_mode).reshape(B, mode*self.future_seg, -1, 2).reshape(B, mode,self.future_seg, -1, 2)
-                y_hat_diff = y_hat_diff.reshape(B, mode, -1, 2)
+                y_hat_diff = self.stream_loc(x_mode).reshape(B, memory_y_hat.size(1), -1, 2)
                 y_hat['predictions'] = y_hat['predictions'] + y_hat_diff
         
         
@@ -376,10 +384,10 @@ class StreamModelForecast(MoeMotion):
                 nn.GELU(),
                 nn.Linear(256, kwargs["embed_dim"]),
                 nn.GELU(),
-                nn.Linear(kwargs["embed_dim"], kwargs["future_steps"] * 2),
+                nn.Linear(kwargs["embed_dim"], kwargs["future_len"] * 2),
             )
             self.traj_embed = nn.Sequential(
-                nn.Linear(kwargs["future_steps"] * 2, kwargs["embed_dim"]),
+                nn.Linear(kwargs["future_len"] * 2, kwargs["embed_dim"]),
                 nn.GELU(),
                 nn.Linear(kwargs["embed_dim"], kwargs["embed_dim"]),
             )

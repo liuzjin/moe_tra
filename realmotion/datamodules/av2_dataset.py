@@ -17,7 +17,7 @@ class Av2Dataset(Dataset):
         n_step: int = 10,
         logger=None,
     ):
-        assert split_points[-1] == 50 and num_historical_steps <= 50
+        # assert split_points[-1] == 50 and num_historical_steps <= 50
         assert split in ['train', 'val', 'test']
         super(Av2Dataset, self).__init__()
         self.data_folder = Path(data_root) / split
@@ -42,12 +42,17 @@ class Av2Dataset(Dataset):
         return data
     
     def process(self, data):
-        sequence_data = []
-        for cur_step in self.split_points:
-            ag_dict = self.process_single_agent(data,cur_step)
+        if self.split_points is not None:
+            sequence_data = []
+            for cur_step in self.split_points:
+                ag_dict = self.process_single_agent(data,cur_step)
+                sequence_data.append(ag_dict)
+            return sequence_data
+        else:
+            sequence_data = []
+            ag_dict = self.process_single_agent(data,self.num_historical_steps)
             sequence_data.append(ag_dict)
-        return sequence_data
-
+            return sequence_data
 
 
     def resample_intent_labels(self,
