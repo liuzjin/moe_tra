@@ -1,9 +1,0 @@
-av2
-tqdm
-tensorboard
-hydra-core
-pytorch-lightning==2.3.0
-wandb
-plotly
-timm
-torchmetrics==1.5.0

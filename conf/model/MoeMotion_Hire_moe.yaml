@@ -6,9 +6,7 @@ pl_module:
   modes: 6
   k: ${top_k}
   n_step: ${n_step}
-  logits_max: True
   history_frames: 50
-  schedule_type: 'linear'
   num_experts: ${num_experts}
   intent_label: ${intent_label}
   model:
@@ -22,6 +20,7 @@ pl_module:
     qkv_bias: False
     drop_path: 0.2
     moe: True
+    his_embed_moe: [True, True, True, True]
     moe_type: "hire_moe"
     query_cross_layers: 2
     query_self_atten: True
@@ -30,7 +29,7 @@ pl_module:
     top_k: ${top_k}
     intent_label: ${intent_label}
   optim:
-    lr: 1e-3
+    lr: 2e-3
     weight_decay: 1e-2
     min_lr: 1e-5
     epochs: ${epochs}

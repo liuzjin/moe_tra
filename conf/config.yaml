@@ -8,10 +8,10 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_I
 
-defaults:
-  - _self_
-  - datamodule: av2_moe
-  - model: MoeMotion_moe_regres
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_moe_regres
 
 # defaults:
 #   - _self_
@@ -24,10 +24,10 @@ defaults:
 #   - datamodule: av2_moe
 #   - model: MoeMotion_cross_moe_mlp
 
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_Hire_moe
+defaults:
+  - _self_
+  - datamodule: av2_moe
+  - model: MoeMotion_Hire_moe
 # defaults:
 #   - _self_
 #   - datamodule: av2_stream

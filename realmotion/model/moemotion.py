@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  MoE_QueryDecoder, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder,HierarchicalGatingDecoder
+from .layers.multimodal_decoder import  HierarchicalDecoder, MoE_QueryDecoder, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, SimpleSegmentalMoeDecoder
 from .layers.transformer_blocks import Block, InterBlock, InteractionModule
 
 
@@ -25,7 +25,7 @@ class MoeMotion(nn.Module):
         future_steps=60,
         future_len=60,
         moe=True,
-        his_embed_moe=False,
+        his_embed_moe=[False],
         moe_type="cross",
         query_cross_layers=2,
         query_self_atten=True,
@@ -105,7 +105,17 @@ class MoeMotion(nn.Module):
                     his_num_segments=self.num_segments, num_experts=num_experts, top_k=top_k, 
                     intent_label=intent_label, drop=mlp_drop)
             elif moe_type == "hire_moe":
-                self.decoder = HierarchicalGatingDecoder(embed_dim, future_steps, intents=num_experts, top_k=top_k)
+                self.decoder = HierarchicalDecoder(               
+                    embed_dim=embed_dim,
+                    num_modes=modes,
+                    future_len=future_len,
+                    future_steps=future_steps,
+                    num_experts=num_experts,
+                    top_k=top_k,
+                    num_heads= 8,
+                    mlp_ratio = mlp_ratio,
+                    qkv_bias = qkv_bias,
+                    query_cross_layers=query_cross_layers,)
             elif moe_type == "cross_moe_mlp":
                 self.decoder = MoE_QueryDecoder(
                     dim=embed_dim,

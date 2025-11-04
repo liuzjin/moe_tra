@@ -406,153 +406,260 @@ class QueryBasedMoeDecoder(nn.Module):
         
         return output
 
-class IndependentSubMoE(nn.Module):
-    def __init__(self, embed_dim: int, future_steps: int, num_sub_experts: int, top_k_micro: int):
+class IntentPlanner(nn.Module):
+    """
+    高层规划器：只负责生成 K 个候选的未来意图序列。
+    """
+    def __init__(self, embed_dim, num_modes, num_segments, num_experts, 
+                    query_cross_layers, num_heads, mlp_ratio,qkv_bias,
+                    drop,attn_drop,drop_path,act_layer=nn.GELU,
+                    norm_layer=nn.LayerNorm):
         super().__init__()
-        self.num_sub_experts = num_sub_experts
-        self.top_k_micro = top_k_micro
+        self.num_modes = num_modes
+        self.num_segments = num_segments
+        self.num_experts = num_experts
+
+        self.mode_queries = nn.Parameter(torch.randn(1, num_modes, embed_dim))
+        self.query_init = nn.ModuleList([Inter_cross_self_Block(
+                                        dim=embed_dim,
+                                        num_heads=num_heads,
+                                        mlp_ratio=mlp_ratio,
+                                        qkv_bias=qkv_bias,
+                                        drop=drop,
+                                        attn_drop=attn_drop,
+                                        drop_path=drop_path,
+                                        act_layer=act_layer,
+                                        norm_layer=norm_layer,
+                                        ) for _ in range(query_cross_layers)])
+        self.history_norm = nn.LayerNorm(embed_dim)
+
+        self.gru_cell = nn.GRUCell(input_size=embed_dim, hidden_size=embed_dim)
+        self.gating_network = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.ReLU(), nn.Linear(embed_dim, num_experts))
+        
+        # 一个可学习的输入，启动GRU循环
+        self.start_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+
+    def forward(self, history_intent_embeddings, key_padding_mask=None):
+        B = history_intent_embeddings.shape[0]
+
+        # 1. 初始化 K 个模态的规划起点
+        queries = self.mode_queries.expand(B, -1, -1)
+        for blk in self.query_init:
+            plan_state = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+        plan_state = self.history_norm(plan_state).view(B * self.num_modes, -1)
+
+        # 2. 自回归生成意图序列
+        # (B*K, D)
+        plan_input = self.start_token.expand(B * self.num_modes, -1, -1).squeeze(1)
+        all_intent_logits = []
+
+        for _ in range(self.num_segments):
+            plan_state = self.gru_cell(plan_input, plan_state)
+            # 输出当前步骤的意图 logits
+            intent_logits = self.gating_network(plan_state) # (B*K, num_experts)
+            all_intent_logits.append(intent_logits)
+
+            # 更新下一轮的输入：这里可以用上一轮的logits或者状态来生成，简化起见直接用状态
+            plan_input = plan_state # 或者更复杂的，比如 nn.Linear(plan_state)
+
+        # 3. 整理输出
+        # List[(B*K, N)] -> (S, B*K, N) -> (B*K, S, N)
+        stacked_logits = torch.stack(all_intent_logits, dim=0).permute(1, 0, 2)
+        # -> (B, K, S, N)
+        return stacked_logits.view(B, self.num_modes, self.num_segments, self.num_experts)
+
+class TrajectoryExecutor(nn.Module):
+    """
+    低层执行器：接收一个确定的意图计划，生成轨迹。
+    """
+    def __init__(self, embed_dim, num_segments, future_steps, num_experts, top_k, **kwargs):
+        super().__init__()
+        self.num_segments = num_segments
         self.future_steps = future_steps
-
-        self.gating_network = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.LayerNorm(embed_dim),
-            nn.ReLU(),
-            nn.Linear(embed_dim, self.num_sub_experts)
-        )
-        self.experts = nn.ModuleList([
-            MLPExpert(embed_dim, future_steps) for _ in range(num_sub_experts)
-        ])
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (B, D)
+        self.top_k = top_k
+        self.num_experts = num_experts
+        # 只需要一个GRU来维持轨迹生成的状态
+        self.gru_cell = nn.GRUCell(input_size=embed_dim, hidden_size=embed_dim)
+        self.experts = nn.ModuleList([MLPExpert(embed_dim, future_steps) for _ in range(num_experts)])
+        self.segment_embedder = nn.Sequential(
+                                nn.Linear(future_steps * 2, embed_dim), 
+                                nn.ReLU(), 
+                                nn.Linear(embed_dim, embed_dim))
         
-        # 1. 内部微观门控
-        sub_logits = self.gating_network(x) # (B, N_sub)
-        sub_probs = F.softmax(sub_logits, dim=-1)
+    def forward(self, initial_state, intent_plan):
+        """
+        Args:
+            initial_state (torch.Tensor): (B, D) GRU的初始状态，可以来自历史编码
+            intent_plan (torch.Tensor): (B, S, N) 一个确定的意图计划
+        """
+        B = initial_state.shape[0]
+        exec_state = initial_state
+        exec_input = torch.zeros_like(initial_state)
         
-        # 2. 选择内部Top-k专家
-        top_k_probs, top_k_indices = torch.topk(sub_probs, self.top_k_micro, dim=-1)
+        future_segments = []
+        for i in range(self.num_segments):
+            exec_state = self.gru_cell(exec_input, exec_state)
+            
+            # 直接使用来自 planner 的意图 logits
+            intent_logits_step_i = intent_plan[:, i, :] # (B, N)
+            
+            # 使用 MoE 执行
+            segment_output = self.moe_executor(exec_state, intent_logits_step_i)
+            future_segments.append(segment_output)
+            
+            # 更新下一轮输入
+            exec_input = self.segment_embedder(segment_output)
+            
+        # 拼接轨迹
+        stacked_segments = torch.stack(future_segments, dim=1) # (B, S, steps*2)
+        trajectory = stacked_segments.view(B, self.num_segments * self.future_steps, 2)
+        return trajectory
+
+    def moe_executor(self, state: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        """
+        高效、向量化的 MoE 执行函数。
+
+        Args:
+            state (torch.Tensor): 当前的思考状态, 形状 (N, D)，其中 N = B * K。
+            logits (torch.Tensor): 门控网络输出的 logits, 形状 (N, num_experts)。
+
+        Returns:
+            torch.Tensor: 加权求和后的轨迹段输出, 形状 (N, future_steps * 2)。
+        """
+        # 1. 选择 Top-K 专家及其权重
+        probs = F.softmax(logits, dim=-1)
+        # top_k_probs: (N, top_k), top_k_indices: (N, top_k)
+        top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
+        # 归一化权重
         top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
 
-        # 3. Top-k专家加权预测
-        temp_predictions = torch.zeros(
-            x.shape[0], self.top_k_micro, self.future_steps, 2, device=x.device
+        # 2. 准备分发 (Dispatch)
+        # 创建一个扁平化的索引，指明每个 "token-expert" 对属于哪个专家
+        # (N, top_k) -> (N * top_k)
+        flat_indices = top_k_indices.view(-1)
+        
+        # 将输入状态重复 top_k 次，以匹配扁平化的索引
+        # (N, D) -> (N * top_k, D)
+        repeated_state = state.repeat_interleave(self.top_k, dim=0)
+
+        # 3. 批量执行专家网络
+        # 初始化一个空的输出张量
+        y_flat = torch.zeros(
+            state.shape[0] * self.top_k, 
+            self.future_steps * 2, 
+            device=state.device,
+            dtype=state.dtype
         )
         
-        for i in range(self.num_sub_experts):
-            mask = (top_k_indices == i)
-            row_indices, col_indices = mask.nonzero(as_tuple=True)
-            if row_indices.numel() > 0:
-                features_for_expert = x[row_indices]
-                expert_output = self.experts[i](features_for_expert).view(-1, self.future_steps, 2)
-                temp_predictions[row_indices, col_indices] = expert_output
+        # 这个循环遍历专家数量 (e.g., 9)，而不是批次大小
+        for i in range(self.num_experts):
+            # 找到所有分配给当前专家 i 的任务
+            mask = (flat_indices == i)
+            
+            if mask.any():
+                # 收集所有需要该专家处理的输入状态
+                expert_inputs = repeated_state[mask]
+                # 一次性地送入专家网络进行计算
+                expert_outputs = self.experts[i](expert_inputs)
+                # 将结果放回扁平化的输出张量中
+                y_flat[mask] = expert_outputs.view(-1, self.future_steps*2)
         
-        weighted_predictions = top_k_probs.unsqueeze(-1).unsqueeze(-1) * temp_predictions
-        final_trajectory = torch.sum(weighted_predictions, dim=1) # (B, T, 2)
+        # 4. 加权聚合 (Combine)
+        # (N * top_k, steps * 2) -> (N, top_k, steps * 2)
+        y = y_flat.view(state.shape[0], self.top_k, -1)
         
-        return final_trajectory
+        # 使用 top_k 的权重进行加权求和
+        # (N, top_k, 1) * (N, top_k, steps * 2) -> (N, top_k, steps * 2)
+        weighted_y = top_k_probs.unsqueeze(-1) * y
+        
+        # (N, top_k, steps * 2) -> (N, steps * 2)
+        final_output = torch.sum(weighted_y, dim=1)
+        
+        return final_output
 
-class HierarchicalGatingDecoder(nn.Module):
-    def __init__(self, 
-                 embed_dim: int, 
-                 future_steps: int,
-                 intents: int = 9, 
-                 num_experts: int = 4,
-                 top_k: int = 2,
-                 modes: int = 6):  # K_macro, 推理时输出的模态数
+class HierarchicalDecoder(nn.Module):
+    """
+    顶层模块，整合规划器和执行器
+    """
+    def __init__(self, embed_dim,
+                num_modes, 
+                future_len,
+                future_steps,
+                num_experts,
+                top_k, 
+                query_cross_layers,
+                num_heads = 8,
+                mlp_ratio = 4.0,
+                qkv_bias = False,
+                drop = 0.2,
+                attn_drop = 0.2,
+                drop_path= 0.2,): # 传入所有需要的参数
         super().__init__()
-        self.embed_dim = embed_dim
-        self.intents = intents
-        self.modes = modes # K
-        self.future_steps = future_steps
+        num_segments = future_len // future_steps
+        self.num_modes= num_modes
+        self.planner = IntentPlanner(embed_dim=embed_dim, 
+                                    num_modes=num_modes, 
+                                    num_segments=num_segments,
+                                    num_experts=num_experts, 
+                                    query_cross_layers=query_cross_layers,
+                                    num_heads=num_heads,
+                                    mlp_ratio=mlp_ratio,
+                                    qkv_bias=qkv_bias,
+                                    drop=drop,
+                                    attn_drop=attn_drop,
+                                    drop_path=drop_path)
+        self.executor = TrajectoryExecutor(embed_dim=embed_dim, 
+                                        num_segments=num_segments,
+                                        future_steps=future_steps, 
+                                        num_experts=num_experts,
+                                        top_k=top_k)
         
-        # --- 1. 顶层宏观意图门控 ---
-        self.top_level_gate = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 2),
-            nn.LayerNorm(embed_dim * 2),
-            nn.ReLU(),
-            nn.Linear(embed_dim * 2, self.intents)
+        # 用于为 Executor 创建初始状态
+        self.executor_init_head = nn.Linear(embed_dim, embed_dim)
+        # 最终的全局概率头
+        # self.prob_head = nn.Linear( * num_segments, 1) # 基于整个计划序列的特征来预测概率
+        self.prob_head = nn.Sequential(
+            nn.Linear(num_segments *num_experts, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 1),
         )
 
-        # --- 2. 独立的、专家不共享的子MoE系统 ---
-        self.sub_systems = nn.ModuleList([
-            IndependentSubMoE(
-                    embed_dim=embed_dim,
-                    future_steps=future_steps,
-                    num_sub_experts=num_experts,
-                    top_k_micro=top_k
-                ) for i in range(intents)])
-
-
-    def forward(self, 
-                encoder_out: torch.Tensor, 
-                training: bool = True,
-                gt_intent_sequence = None,
-                **kwargs) -> Dict:
-        # gt_macro_intent shape: (B,)
+    def forward(self, history_intent_embeddings,mode, key_padding_mask=None,lane_mask=None):
+        B = history_intent_embeddings.shape[0]
         
-        scene_context = encoder_out[:, 0]
-        batch_size = scene_context.shape[0]
+        # 1. 高层规划：生成 K 个候选意图计划
+        # (B, K, S, N)
+        k_intent_plans_logits = self.planner(history_intent_embeddings, key_padding_mask)
+        
+        # 2. 低层执行：为每个计划生成一条轨迹
+        all_predictions = []
+        # (B, D) - 从历史中提炼一个统一的执行起点
+        executor_initial_state = self.executor_init_head(history_intent_embeddings.mean(dim=1))
 
-        # --- 步骤 1: 计算顶层宏观意图的Logits ---
-        macro_logits = self.top_level_gate(scene_context) # (B, M)
+        for k in range(self.num_modes):
+            # 获取第 k 个计划 (B, S, N)
+            current_plan = k_intent_plans_logits[:, k, :, :]
+            # 执行该计划
+            trajectory_k = self.executor(executor_initial_state, current_plan)
+            all_predictions.append(trajectory_k)
+            
+        # 3. 整理输出
+        # List[(B, T, 2)] -> (B, K, T, 2)
+        final_predictions = torch.stack(all_predictions, dim=1)
 
-        if training:
-            # --- 训练逻辑 ---
-            # 我们只训练真值意图对应的那个子系统，以提供最强的监督信号
-            gt_intent_sequence = gt_intent_sequence.squeeze()
-            if gt_intent_sequence is None:
-                raise ValueError("gt_macro_intent must be provided during training.")
-            
-            final_predictions = torch.zeros(batch_size, self.future_steps, 2, device=scene_context.device)
-            
-            for i in range(self.intents):
-                # 找到宏观意图为 i 的样本
-                mask = (gt_intent_sequence == i)
-                if mask.any():
-                    # 只让第 i 个子系统对这些样本进行预测
-                    sub_system_output = self.sub_systems[i](scene_context[mask])
-                    # 将结果放回最终的预测张量
-                    final_predictions[mask] = sub_system_output
+        # 4. 计算全局概率
+        # (B, K, S, N) -> (B, K, S*N) -> (B, K, D') -> (B, K, 1) -> (B, K)
+        # 用一种方式将计划的logits序列转换为特征向量
+        plan_features = k_intent_plans_logits.reshape(B, self.num_modes, -1)
+        # 这里需要一个更复杂的头，比如一个小型Transformer或MLP
+        mode_logits = self.prob_head(plan_features).squeeze(-1) # 这是一个简化的例子
 
-            # 训练时，predictions 只有一个模态，即真值模态的预测结果
-            # 这使得回归损失的计算非常直接
-            output = {
-                "predictions": final_predictions.unsqueeze(1), # (B, 1, T, 2)
-                "logits": macro_logits # (B, M) - 用于计算顶层门控损失
-            }
-        else:
-            # --- 推理逻辑 ---
-            # 我们选择Top-K个最可能的宏观意图，并让对应的子系统生成轨迹
-            macro_probs = F.softmax(macro_logits, dim=-1)
-            top_k_probs, top_k_indices = torch.topk(macro_probs, self.modes, dim=-1)
-            
-            all_modal_trajs = torch.zeros(
-                batch_size, self.modes, self.future_steps, 2, device=scene_context.device
-            )
-
-            # 遍历 K 个 top 模态
-            for k in range(self.modes):
-                # 当前第k个最可能的意图索引 (B,)
-                intent_indices = top_k_indices[:, k]
-                
-                # 遍历所有可能的 M 个意图
-                for i in range(self.intents):
-                    mask = (intent_indices == i)
-                    if mask.any():
-                        # 让第 i 个子系统对这些样本进行预测
-                        sub_system_output = self.sub_systems[i](scene_context[mask])
-                        # 将结果放入第 k 个模态的对应位置
-                        all_modal_trajs[mask, k, :, :] = sub_system_output
-            
-            output = {
-                "predictions": all_modal_trajs, # (B, K, T, 2)
-                "pi": top_k_probs,           # (B, K)
-                "logits": macro_logits          # (B, M) - 完整的logits
-            }
-            
-        return output
-
+        return {
+            "predictions": final_predictions,
+            "pi": mode_logits,
+            "intent_plans_logits": k_intent_plans_logits, # 返回计划，用于损失计算
+            "states":mode_logits
+        }
 
 class MoE_QueryDecoder(nn.Module):
     def __init__(self,

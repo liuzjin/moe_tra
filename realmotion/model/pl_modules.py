@@ -628,54 +628,56 @@ class Hierarchical_Moe(MoeLightningModule):
         gt_traj = data['target'][:, 0]
         y_others = data['target'][:, 1:]
         others_reg_mask = data['target_mask'][:, 1:]
-        gt_macro_intent = data.get('intent')[:,0,0]  # (B,)
+        gt_macro_intent = data.get('intent')[:,0]  # (B,)
         
         # --- 1. 回归损失 ---
         # 训练时 out['predictions'] 的形状是 (B, 1, T, 2)
-        predictions = out['y_hat']['predictions'].squeeze(1) # (B, T, 2)
+        predictions = out['y_hat']['predictions'] # (B, T, 2)
         y_hat_others = out.get('y_hat_others')
-        regression_loss = F.smooth_l1_loss(predictions, gt_traj)
-        others_reg_loss = F.smooth_l1_loss(
+        mode_logits = out['y_hat']['pi']
+        intent_plans_logits = out['y_hat']['intent_plans_logits'] 
+
+        gt_expanded = gt_traj.unsqueeze(1) # (B, 1, T, 2)
+        l2_dist_per_mode = torch.norm(predictions - gt_expanded, p=2, dim=-1).mean(dim=-1) # (B, K)
+        _, best_mode_indices = torch.min(l2_dist_per_mode, dim=-1)
+
+        y_hat_best = predictions[torch.arange(gt_traj.shape[0]), best_mode_indices]
+        regression_loss = F.smooth_l1_loss(y_hat_best, gt_traj)
+
+        others_reg_loss = torch.tensor(0.0, device=gt_traj.device)
+        if y_hat_others is not None and y_others.numel() > 0:
+            if others_reg_mask.sum() > 0:
+                others_reg_loss = F.smooth_l1_loss(
                     y_hat_others[others_reg_mask], y_others[others_reg_mask]
                 )
+
+        mode_gating_loss = F.cross_entropy(mode_logits, best_mode_indices.detach())
         
-        # --- 2. 顶层门控分类损失 ---
-        macro_logits = out['y_hat']['logits'] # (B, M)
-        gating_loss = F.cross_entropy(macro_logits, gt_macro_intent)
+        if self.intent_label:
+                best_plan_logits = intent_plans_logits[torch.arange(gt_traj.shape[0]), best_mode_indices] # (B, S, N)
+                planner_loss_with_gt = F.cross_entropy(best_plan_logits.reshape(-1, self.num_experts), gt_macro_intent.reshape(-1))
+        else:
+                planner_loss_with_gt = torch.tensor(0.0, device=gt_traj.device)
+        g_weight_mode = 1.0
+        g_weight_segment = 0.1
+        o_weight = 1.0 # 其他智能体的损失权重
+
         
-        # --- 总损失 ---
-        total_loss = regression_loss + others_reg_loss + 1.0 * gating_loss
+        total_loss = (regression_loss + 
+                    g_weight_mode * mode_gating_loss + 
+                    g_weight_segment * planner_loss_with_gt +
+                    o_weight * others_reg_loss)
         
+        # --- 5. 构建日志字典 ---
         loss_dict = {
             'total_loss': total_loss.item(),
             'regression_loss': regression_loss.item(),
-            'gating_loss': gating_loss.item(),
+            'mode_gating_loss': mode_gating_loss.item(),
+            'segment_gating_loss': planner_loss_with_gt.item(),
             'others_reg_loss': others_reg_loss.item(),
         }
-        return total_loss, loss_dict
 
-    def validation_step(self, data, batch_idx):
-        self.eval()
-        out = self(data, False)
-    
-        mode_logits = out['y_hat']['logits']      # (B, K)
-        _, top1_indices = torch.max(mode_logits, dim=-1)
-        out = {
-            'y_hat': out['y_hat']['predictions'],
-            'pi': out['y_hat']['pi'],
-            'y_hat_others': out['y_hat_others'],
-            'intent': top1_indices,
-            'intent_target': data['intent'][:, 0],
-        }
-        metrics = self.metrics(out, data['target'][:, 0])
-        self.log_dict(
-            metrics,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-            batch_size=1,
-            sync_dist=True,
-        )
+        return total_loss, loss_dict
 
 class Cross_moe_mlp_Module(BaseLightningModule):
     def __init__(self,
