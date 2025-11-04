@@ -1298,7 +1298,12 @@ class QuerrySegmentDecoder(nn.Module):
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
 
-        self.gating_network = nn.Linear(embed_dim, num_experts)
+        # self.gating_network = nn.Linear(embed_dim, num_experts)
+        self.gating_network = nn.Sequential(
+            nn.Linear(embed_dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, num_experts),
+        )
         
         # 专家列表(Executor)，每个专家生成一个运动原语
         self.experts = nn.ModuleList([
