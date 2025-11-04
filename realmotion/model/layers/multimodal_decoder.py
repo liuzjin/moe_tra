@@ -752,7 +752,11 @@ class RegressionSegmentDecoder(nn.Module):
         self.gru_cell = nn.GRUCell(input_size=embed_dim, hidden_size=embed_dim)
         # self.attn_layer = nn.MultiheadAttention(embed_dim, num_heads)
         # 门控网络(Planner)，根据思考状态决定调用哪个专家
-        self.gating_network = nn.Linear(embed_dim, num_experts)
+        self.gating_network = nn.Sequential(
+            nn.Linear(embed_dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, num_experts),
+        )
         
         # 专家列表(Executor)，每个专家生成一个运动原语
         self.experts = nn.ModuleList([
@@ -768,7 +772,12 @@ class RegressionSegmentDecoder(nn.Module):
 
         # --- 3. 最终输出模块 ---
         # 预测每个模态的概率
-        self.prob_head = nn.Linear(embed_dim, 1)
+        self.prob_head = nn.Sequential(
+            nn.Linear(embed_dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 1),
+        )
+
 
     def forward(self, history_intent_embeddings,mode,key_padding_mask=None,lane_mask=None):
         """
@@ -805,12 +814,12 @@ class RegressionSegmentDecoder(nn.Module):
             # thought_state = self.attn_layer(gru_input, thought_state, thought_state)[0]
             # b) 规划：决定下一步意图 (路由到专家)
             thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
-            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings[:,-lane_mask.shape[1]:], key_padding_mask=lane_mask)
+            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
             rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
-            states.append(rich_thought_state)
+            
             rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
             expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
-            
+            states.append(expert_logits)
             segment_output_flat = self._moe_execution(rich_thought_state, expert_logits)
             future_segments.append(segment_output_flat)
             
@@ -831,11 +840,11 @@ class RegressionSegmentDecoder(nn.Module):
         # (B*K, T, 2) -> (B, K, T, 2)
         final_predictions = trajectories_flat.view(B, self.num_modes, self.future_len, 2)
         states = torch.stack(states, dim=1)
-        states = states.reshape(B, -1, self.embed_dim)
+        # states = states.reshape(B, -1, self.embed_dim)
         return {
             "predictions": final_predictions, # (B, K, T, 2)
-            "logits": mode_logits,            # (B, K)
-            "probs": F.softmax(mode_logits, dim=-1),
+            "pi": mode_logits,            # (B, K)
+            "segment_logits_per_mode": states,
             "states": states
         }
     def _moe_execution(self, state: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
