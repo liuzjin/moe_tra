@@ -50,7 +50,7 @@ epochs: 80
 checkpoint: 
 submit:
 n_step: 20
-top_k: 2
+top_k: 1
 num_experts: 9
 future_len: 60
 history_len: 50

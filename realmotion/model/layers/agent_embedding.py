@@ -61,7 +61,9 @@ class AgentEmbeddingLayer(nn.Module):
                 nn.Conv1d(self.num_features[i_layer], n, 3, padding=1)
             )
 
-        self.fpn_conv = nn.Conv1d(n, n, 3, padding=1)
+        self.fpn_conv1 = nn.Conv1d(n, n, 3, padding=1)
+        self.fpn_conv2 = nn.Conv1d(n, n, 3, padding=1)
+
 
     def forward(self, x):
         """x: [B, C, T]"""
@@ -86,7 +88,10 @@ class AgentEmbeddingLayer(nn.Module):
                 align_corners=False,
             )
 
-        out = self.fpn_conv(laterals[-1])
+        out1 = self.fpn_conv1(laterals[-1])
+        out2 = self.fpn_conv2(laterals[0])
+        
+        out = torch.cat([out1, out2[:,:,-1:]], dim=-1)
 
         # return out[:, :, -1]
         return out.permute(0, 2, 1).contiguous()
