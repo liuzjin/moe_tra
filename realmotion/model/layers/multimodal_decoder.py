@@ -1491,14 +1491,48 @@ class QuerrySegmentDecoder(nn.Module):
         initial_segments_flat = self._moe_execution(all_intents_flat, expert_logits)
         
 
-        final_predictions = initial_segments_flat.reshape(B, self.num_modes, self.num_segments, self.future_steps, 2)
-        final_predictions = final_predictions.reshape(B, self.num_modes, -1, 2)
+        delta_segments = initial_segments_flat.view(
+            B, self.num_modes, self.num_segments, self.future_steps, 2
+        )
+        absolute_segments = []
+
+        last_endpoint = torch.zeros(
+            B, self.num_modes, 1, 2, 
+            device=delta_segments.device, 
+            dtype=delta_segments.dtype
+        )
+
+
+        for i in range(self.num_segments):
+            # 获取当前分段的位移预测
+            # shape: (B, K, T_seg, 2)
+            current_delta_segment = delta_segments[:, :, i, :, :]
+            
+            # 将上一段的终点加到当前段的每一个位移点上，得到当前段的绝对坐标
+            current_absolute_segment = current_delta_segment + last_endpoint
+            
+            # 将计算好的绝对坐标分段存入列表
+            absolute_segments.append(current_absolute_segment)
+            
+            # 更新下一轮循环所需要的“上一段的终点”
+            # 取当前绝对坐标分段的最后一个点作为新的终点
+            # shape: (B, K, 2) -> unsqueeze -> (B, K, 1, 2)
+            last_endpoint = current_absolute_segment[:, :, -1, :].unsqueeze(2)
+
+        # 将列表中所有的绝对坐标分段在时间维度上拼接起来
+        # List of (B, K, T_seg, 2) -> (B, K, T_total, 2)
+        final_predictions = torch.cat(absolute_segments, dim=2)
+
+        # --- 准备 expert_logits 以便损失函数使用 ---
+        # expert_logits 形状是 (B*K*S, N)
+        # reshape 成 (B, K, S, N) 以便后续处理
+        segment_logits_per_mode = expert_logits.view(B, self.num_modes, self.num_segments, self.num_experts)
 
         return {
-            "predictions": final_predictions, # (B, K, T, 2)
-            "pi": mode_logits,            # (B, K)
-            "segment_logits_per_mode": expert_logits,
-            "states": mode
+            "predictions": final_predictions,           # (B, K, T, 2)
+            "pi": mode_logits,                          # (B, K)
+            "segment_logits_per_mode": segment_logits_per_mode, # (B, K, S, N)
+            "states": mode_logits
         }
     def _moe_execution(self, state: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         """
