@@ -926,6 +926,7 @@ class RegressionSegmentDecoder(nn.Module):
         future_segments = []
         states = []
         # --- 步骤 4: 自回归循环 ---
+        last_endpoint = torch.zeros(B*self.num_modes, 1, 2, device=thought_state.device, dtype=thought_state.dtype)
         for i in range(self.num_segments):
             # a) 更新思考状态
             thought_state = self.gru_cell(gru_input, thought_state)
@@ -935,13 +936,17 @@ class RegressionSegmentDecoder(nn.Module):
             context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
             rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
             
-            rich_thought_state = rich_thought_state
+
             expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
             states.append(expert_logits)
 
             segment_output_flat = self._moe_execution(rich_thought_state.view(B * self.num_modes, self.embed_dim), expert_logits.view(B * self.num_modes, -1))
+            segment_output_flat = segment_output_flat.reshape(B * self.num_modes, self.future_steps, 2)
+            segment_output_flat = segment_output_flat + last_endpoint
             
             future_segments.append(segment_output_flat)
+            last_endpoint = segment_output_flat[:, -1, :].unsqueeze(1)
+            segment_output_flat = segment_output_flat.reshape(B * self.num_modes, self.future_steps*2)
             
             # d) 更新：将生成的轨迹段编码，作为下一次GRU的输入
             gru_input = self.segment_embedder(segment_output_flat)
@@ -949,11 +954,11 @@ class RegressionSegmentDecoder(nn.Module):
         # --- 步骤 5: 拼接和整理输出 ---
         # 将分段列表堆叠起来
         # List[(B*K, steps*2)] -> (S, B*K, steps*2)
-        stacked_segments = torch.stack(future_segments, dim=0)
+        stacked_segments = torch.stack(future_segments, dim=1)
         
         # 调整形状为最终轨迹格式
         # (S, B*K, steps*2) -> (B*K, S, steps*2) -> (B*K, T, 2)
-        trajectories_flat = stacked_segments.permute(1, 0, 2).reshape(
+        trajectories_flat = stacked_segments.reshape(
             B * self.num_modes, self.future_len, 2
         )
         
