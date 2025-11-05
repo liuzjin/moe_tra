@@ -431,6 +431,17 @@ class IntentPlanner(nn.Module):
                                         act_layer=act_layer,
                                         norm_layer=norm_layer,
                                         ) for _ in range(query_cross_layers)])
+        self.query_attn =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(self.num_segments))
         self.history_norm = nn.LayerNorm(embed_dim)
 
         self.gru_cell = nn.GRUCell(input_size=embed_dim, hidden_size=embed_dim)
@@ -924,10 +935,12 @@ class RegressionSegmentDecoder(nn.Module):
             context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
             rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
             
-            rich_thought_state = rich_thought_state.view(B * self.num_modes, self.embed_dim)
+            rich_thought_state = rich_thought_state
             expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
             states.append(expert_logits)
-            segment_output_flat = self._moe_execution(rich_thought_state, expert_logits)
+
+            segment_output_flat = self._moe_execution(rich_thought_state.view(B * self.num_modes, self.embed_dim), expert_logits.view(B * self.num_modes, -1))
+            
             future_segments.append(segment_output_flat)
             
             # d) 更新：将生成的轨迹段编码，作为下一次GRU的输入
@@ -946,7 +959,7 @@ class RegressionSegmentDecoder(nn.Module):
         
         # (B*K, T, 2) -> (B, K, T, 2)
         final_predictions = trajectories_flat.view(B, self.num_modes, self.future_len, 2)
-        states = torch.stack(states, dim=1)
+        states = torch.stack(states, dim=2)
         # states = states.reshape(B, -1, self.embed_dim)
         return {
             "predictions": final_predictions, # (B, K, T, 2)
@@ -1016,7 +1029,6 @@ class RegressionSegmentDecoder(nn.Module):
         
         return final_output
     
-
 
 class Regress_refine(RegressionSegmentDecoder):
     def __init__(self, **kwargs):
