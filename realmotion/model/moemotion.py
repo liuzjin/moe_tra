@@ -297,7 +297,7 @@ class MoeMotion(nn.Module):
         x_encoder = self.norm(x_encoder)
 
         if self.moe:
-            y_hat = self.decoder(x_encoder, mode, key_padding_mask=~key_valid_mask, lane_mask=~data['lane_key_valid_mask'])
+            y_hat = self.decoder(x_encoder, segment, key_padding_mask=~key_valid_mask, lane_mask=~data['lane_key_valid_mask'])
             x_mode = y_hat['states']
         else:
             x_agent = x_encoder[:, :segment]

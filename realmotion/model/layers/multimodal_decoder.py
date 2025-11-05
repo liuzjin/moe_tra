@@ -911,7 +911,7 @@ class RegressionSegmentDecoder(nn.Module):
         )
 
 
-    def forward(self, history_intent_embeddings,mode,key_padding_mask=None,lane_mask=None):
+    def forward(self, history_intent_embeddings,hist_seg,key_padding_mask=None,lane_mask=None):
         """
         Args:
             history_intent_embeddings (torch.Tensor): 编码器输出的历史意图序列。
@@ -941,6 +941,8 @@ class RegressionSegmentDecoder(nn.Module):
         states = []
         # --- 步骤 4: 自回归循环 ---
         map_context = history_intent_embeddings[:, -lane_mask.shape[1]:,:]
+        hist_context = history_intent_embeddings[:, :hist_seg,:]
+        map_context = torch.cat([map_context, hist_context], dim=1)
         last_endpoint = torch.zeros(B*self.num_modes, 1, 2, device=thought_state.device, dtype=thought_state.dtype)
         for i in range(self.num_segments):
             # a) 更新思考状态
