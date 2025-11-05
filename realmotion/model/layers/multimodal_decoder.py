@@ -58,7 +58,9 @@ class MultimodalDecoder(nn.Module):
                  "mode": x }
     
 class MLPExpert(nn.Module):
-    def __init__(self, d_model: int, prediction_horizon: int, drop: int=0.0):
+    def __init__(self, d_model, prediction_horizon, drop=0.0, num_heads=8,
+                 mlp_ratio=4.0, qkv_bias=False, attn_drop=0.0, drop_path=0.0,
+                 query_cross_layers=2,act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.prediction_horizon = prediction_horizon
         hidden_dim = d_model * 2 
@@ -72,10 +74,24 @@ class MLPExpert(nn.Module):
             nn.Dropout(drop),
             nn.Linear(hidden_dim, prediction_horizon * 2) 
         )
+        self.query_map =nn.ModuleList(Inter_cross_self_Block(
+                    dim=d_model,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
 
-    def forward(self, expert_feature):
+
+    def forward(self, expert_feature, map_context):
 
         # (Batch, d_model) -> (Batch, prediction_horizon * 2)
+        for blk in self.query_map:
+            expert_feature = blk(src=expert_feature, src_kv=map_context)
         flat_trajectory = self.mlp(expert_feature)
         
         # (Batch, prediction_horizon * 2) -> (Batch, prediction_horizon, 2)
@@ -853,17 +869,6 @@ class RegressionSegmentDecoder(nn.Module):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                 ) for i in range(self.num_segments))
-        # self.query_attn =Inter_cross_self_Block(
-        #             dim=embed_dim,
-        #             num_heads=num_heads,
-        #             mlp_ratio=mlp_ratio,
-        #             qkv_bias=qkv_bias,
-        #             drop=drop,
-        #             attn_drop=attn_drop,
-        #             drop_path=drop_path,
-        #             act_layer=act_layer,
-        #             norm_layer=norm_layer,
-        #         )
 
         # --- 2. 自回归循环模块 ---
         # GRUCell用于在每个时间步更新“思考状态”
@@ -878,8 +883,17 @@ class RegressionSegmentDecoder(nn.Module):
         
         # 专家列表(Executor)，每个专家生成一个运动原语
         self.experts = nn.ModuleList([
-            MLPExpert(embed_dim, future_steps) for _ in range(num_experts)
+            MLPExpert(d_model=embed_dim, 
+                    prediction_horizon=future_steps,
+                    drop=drop, 
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias, 
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    query_cross_layers=query_cross_layers) for _ in range(num_experts)
         ])
+
         
         # 将生成的轨迹段重新编码为特征，用于更新GRU状态
         self.segment_embedder = nn.Sequential(
@@ -926,6 +940,7 @@ class RegressionSegmentDecoder(nn.Module):
         future_segments = []
         states = []
         # --- 步骤 4: 自回归循环 ---
+        map_context = history_intent_embeddings[:, -lane_mask.shape[1]:,:]
         last_endpoint = torch.zeros(B*self.num_modes, 1, 2, device=thought_state.device, dtype=thought_state.dtype)
         for i in range(self.num_segments):
             # a) 更新思考状态
@@ -940,7 +955,7 @@ class RegressionSegmentDecoder(nn.Module):
             expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
             states.append(expert_logits)
 
-            segment_output_flat = self._moe_execution(rich_thought_state.view(B * self.num_modes, self.embed_dim), expert_logits.view(B * self.num_modes, -1))
+            segment_output_flat = self._moe_execution(rich_thought_state.view(B * self.num_modes, self.embed_dim),map_context, expert_logits.view(B * self.num_modes, -1))
             segment_output_flat = segment_output_flat.reshape(B * self.num_modes, self.future_steps, 2)
             segment_output_flat = segment_output_flat + last_endpoint
             
@@ -972,7 +987,7 @@ class RegressionSegmentDecoder(nn.Module):
             "segment_logits_per_mode": states,
             "states": states
         }
-    def _moe_execution(self, state: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+    def _moe_execution(self, state: torch.Tensor,map_context: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         """
         高效、向量化的 MoE 执行函数。
 
@@ -997,8 +1012,10 @@ class RegressionSegmentDecoder(nn.Module):
         
         # 将输入状态重复 top_k 次，以匹配扁平化的索引
         # (N, D) -> (N * top_k, D)
+        B, M, D    =map_context.shape
+        map_context = map_context.unsqueeze(1).repeat_interleave(self.num_modes, dim=1).reshape(-1, M, D)
         repeated_state = state.repeat_interleave(self.top_k, dim=0)
-
+        repeated_map_context = map_context.repeat_interleave(self.top_k, dim=0)
         # 3. 批量执行专家网络
         # 初始化一个空的输出张量
         y_flat = torch.zeros(
@@ -1016,8 +1033,9 @@ class RegressionSegmentDecoder(nn.Module):
             if mask.any():
                 # 收集所有需要该专家处理的输入状态
                 expert_inputs = repeated_state[mask]
+                expert_inputs_map = repeated_map_context[mask]
                 # 一次性地送入专家网络进行计算
-                expert_outputs = self.experts[i](expert_inputs)
+                expert_outputs = self.experts[i](expert_inputs.unsqueeze(1), expert_inputs_map)
                 # 将结果放回扁平化的输出张量中
                 y_flat[mask] = expert_outputs.view(-1, self.future_steps*2)
         
