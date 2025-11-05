@@ -59,7 +59,7 @@ class MultimodalDecoder(nn.Module):
     
 class MLPExpert(nn.Module):
     def __init__(self, d_model, prediction_horizon, drop=0.0, num_heads=8,
-                 mlp_ratio=4.0, qkv_bias=False, attn_drop=0.0, drop_path=0.0,
+                 mlp_ratio=4.0,moe_drop=0.0, qkv_bias=False, attn_drop=0.0, drop_path=0.0,
                  query_cross_layers=2,act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.prediction_horizon = prediction_horizon
@@ -68,10 +68,10 @@ class MLPExpert(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(d_model, 256),
             nn.ReLU(),
-            nn.Dropout(drop),
+            nn.Dropout(moe_drop),
             nn.Linear(256, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(drop),
+            nn.Dropout(moe_drop),
             nn.Linear(hidden_dim, prediction_horizon * 2) 
         )
         self.query_map =nn.ModuleList(Inter_cross_self_Block(
@@ -824,7 +824,7 @@ class RegressionSegmentDecoder(nn.Module):
                  qkv_bias = False,
                  drop = 0.2,
                  attn_drop = 0.2,
-                 mlp_drop =0.2,
+                 moe_drop =0.2,
                  drop_path= 0.2,
                  act_layer=nn.GELU,
                  norm_layer=nn.LayerNorm,
@@ -887,6 +887,7 @@ class RegressionSegmentDecoder(nn.Module):
                     prediction_horizon=future_steps,
                     drop=drop, 
                     num_heads=num_heads,
+                    moe_drop=moe_drop,
                     mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias, 
                     attn_drop=attn_drop,

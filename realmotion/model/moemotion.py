@@ -140,7 +140,7 @@ class MoeMotion(nn.Module):
                     num_heads= 8,
                     mlp_ratio = mlp_ratio,
                     qkv_bias = qkv_bias,
-                    mlp_drop=mlp_drop,
+                    moe_drop=mlp_drop,
                     query_cross_layers=query_cross_layers,
                     )
             elif moe_type == "intent_regre_refine":
