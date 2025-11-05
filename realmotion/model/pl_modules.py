@@ -388,7 +388,7 @@ class MoeLightningModule(BaseLightningModule):
     def __init__(self,
                  total_epochs=100,
                  modes=6,
-                 k=2,
+                 top_k=2,
                  n_step=10,
                  history_frames=50,
                  num_experts=9,
@@ -397,7 +397,7 @@ class MoeLightningModule(BaseLightningModule):
         super().__init__(**kwargs)
         self.total_epochs = total_epochs
         self.modes = modes
-        self.k = k
+        self.top_k = top_k
         self.n_step = n_step
         self.history_frames = history_frames
         self.n = 60 // n_step
@@ -596,10 +596,30 @@ class MoeLightningModule(BaseLightningModule):
         # 添加 stage 前缀 (val/ or test/) 并记录
         self.log_dict({f"val/{k}": v for k, v in loss_dict.items()}, 
                     on_step=False, on_epoch=True, sync_dist=True)
+        segment_expert_logits = out['y_hat']['segment_logits_per_mode']
 
+        # b) 将所有 N 个专家的 logits 转换为完整的概率分布
+        segment_expert_probs = torch.softmax(segment_expert_logits, dim=-1) # (B, K, S, N)
+        
+        # c) 对每个分段，选出概率最高的 top_k 个专家的概率值
+        # self.top_k 应该是您在模型中定义的超参数 (e.g., 2 or 4)
+        # topk_probs 的形状将是 (B, K, S, self.top_k)
+        topk_probs, _ = torch.topk(segment_expert_probs, k=self.top_k, dim=-1)
+
+        # d) 将这 top_k 个专家的概率相加，得到该分段的“联盟置信度”
+        # dim=-1 表示在最后一个维度 (top_k 维度) 上求和
+        confidence_per_segment = torch.sum(topk_probs, dim=-1) # (B, K, S)
+        
+        # e) 在对数空间中，将所有分段的置信度相加，得到总的轨迹置信度分数
+        # 这就是我们将用来对K个模态进行排序的最终 "pi"
+        # dim=2 表示沿着分段(S)维度进行求和
+        trajectory_confidence_score = torch.sum(
+            torch.log(confidence_per_segment + 1e-9), # 加 epsilon 防止 log(0)
+            dim=2 
+        ) # 最终形状: (B, K)
         out = {
             'y_hat': out['y_hat']['predictions'],
-            'pi': out['y_hat']['pi'],
+            'pi': trajectory_confidence_score,
             'y_hat_others': out['y_hat_others'],
         }
         metrics = self.metrics(out, data['target'][:, 0])
