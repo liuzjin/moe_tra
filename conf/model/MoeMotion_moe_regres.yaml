@@ -5,6 +5,7 @@ pl_module:
   intent_label: ${intent_label}
   num_experts: ${num_experts}
   top_k: ${top_k}
+  n_step: ${n_step}
   model:
     _target_: realmotion.model.moemotion.MoeMotion
     embed_dim: 128

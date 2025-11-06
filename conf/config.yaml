@@ -54,7 +54,7 @@ top_k: 2
 num_experts: 9
 future_len: 60
 history_len: 50
-intent_label: False
+intent_label: True
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
