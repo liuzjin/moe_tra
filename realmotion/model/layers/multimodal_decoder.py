@@ -1150,7 +1150,7 @@ class RegressionSegmentDecoder2(nn.Module):
         )
 
 
-     def forward(self, history_intent_embeddings,hist_seg,key_padding_mask=None,lane_mask=None):
+    def forward(self, history_intent_embeddings,hist_seg,key_padding_mask=None,lane_mask=None):
         """
         Args:
             history_intent_embeddings (torch.Tensor): 编码器输出的历史意图序列。
