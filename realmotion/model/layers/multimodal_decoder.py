@@ -84,7 +84,7 @@ class MLPExpert(nn.Module):
                     drop_path=drop_path,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                ) for i in range(query_cross_layers))
+                ) for i in range(0))
 
 
     def forward(self, expert_feature, map_context):
@@ -1031,6 +1031,279 @@ class RegressionSegmentDecoder(nn.Module):
                 # 收集所有需要该专家处理的输入状态
                 expert_inputs = repeated_state[mask]
                 expert_inputs_map = repeated_map_context[mask]
+                # 一次性地送入专家网络进行计算
+                expert_outputs = self.experts[i](expert_inputs.unsqueeze(1), expert_inputs_map)
+                # 将结果放回扁平化的输出张量中
+                y_flat[mask] = expert_outputs.view(-1, self.future_steps*2)
+        
+        # 4. 加权聚合 (Combine)
+        # (N * top_k, steps * 2) -> (N, top_k, steps * 2)
+        y = y_flat.view(state.shape[0], self.top_k, -1)
+        
+        # 使用 top_k 的权重进行加权求和
+        # (N, top_k, 1) * (N, top_k, steps * 2) -> (N, top_k, steps * 2)
+        weighted_y = top_k_probs.unsqueeze(-1) * y
+        
+        # (N, top_k, steps * 2) -> (N, steps * 2)
+        final_output = torch.sum(weighted_y, dim=1)
+        
+        return final_output
+    
+class RegressionSegmentDecoder2(nn.Module):
+    def __init__(self,
+                 embed_dim: int,
+                 num_modes: int,
+                 future_len: int,
+                 future_steps: int,
+                 num_experts: int,
+                 top_k: int,
+                 num_heads: int = 8,
+                 mlp_ratio = 4.0,
+                 qkv_bias = False,
+                 drop = 0.2,
+                 attn_drop = 0.2,
+                 moe_drop =0.2,
+                 drop_path= 0.2,
+                 act_layer=nn.GELU,
+                 norm_layer=nn.LayerNorm,
+                 query_cross_layers=2):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_modes = num_modes
+        self.future_len = future_len
+        self.future_steps = future_steps
+        self.num_segments = future_len // future_steps
+        self.num_experts = num_experts
+        self.top_k = top_k
+
+        # --- 1. 初始化模块 ---
+        # K个可学习的模态查询，作为K种不同未来的“种子”
+        self.mode_queries = nn.Parameter(torch.randn(1, self.num_modes, self.embed_dim))
+        
+        # 交叉注意力，用于融合历史意图和模态查询
+        # self.history_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.history_norm = nn.LayerNorm(embed_dim)
+        self.context_norm = nn.LayerNorm(embed_dim)
+        self.query_init =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
+
+        self.query_attn =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(self.num_segments))
+
+        # --- 2. 自回归循环模块 ---
+        # GRUCell用于在每个时间步更新“思考状态”
+        self.gru_cell = nn.GRUCell(input_size=embed_dim, hidden_size=embed_dim)
+        # self.attn_layer = nn.MultiheadAttention(embed_dim, num_heads)
+        # 门控网络(Planner)，根据思考状态决定调用哪个专家
+        self.gating_network = nn.Sequential(
+            nn.Linear(embed_dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, num_experts),
+        )
+        
+        # 专家列表(Executor)，每个专家生成一个运动原语
+        self.experts = nn.ModuleList([
+            MLPExpert(d_model=embed_dim, 
+                    prediction_horizon=future_steps,
+                    drop=drop, 
+                    num_heads=num_heads,
+                    moe_drop=moe_drop,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias, 
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    query_cross_layers=query_cross_layers) for _ in range(num_experts)
+        ])
+
+        
+        # 将生成的轨迹段重新编码为特征，用于更新GRU状态
+        self.segment_embedder = nn.Sequential(
+            nn.Linear(future_steps * 2, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+
+        # --- 3. 最终输出模块 ---
+        # 预测每个模态的概率
+        self.prob_head = nn.Sequential(
+            nn.Linear(embed_dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 1),
+        )
+
+
+    def forward(self, history_intent_embeddings,hist_seg,key_padding_mask=None,lane_mask=None):
+        """
+        Args:
+            history_intent_embeddings (torch.Tensor): 编码器输出的历史意图序列。
+                                                      形状: (B, T_hist_segments, D)，例如 (32, 5, 128)
+        """
+        B = history_intent_embeddings.shape[0]
+
+        # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
+        queries = self.mode_queries.expand(B, -1, -1) # (B, K, D)
+        
+        for blk in self.query_init:
+            initial_state = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+        
+        initial_state = self.history_norm(initial_state) # (B, K, D)
+
+        # --- 步骤 2: 预测全局模态概率 ---
+        # 基于对历史的初始理解，直接预测每个模态的可能性
+        mode_logits = self.prob_head(initial_state).squeeze(-1) # (B, K)
+        
+        # --- 步骤 3: 准备自回归生成 ---
+        # 将所有模态展平到一个批次中，以进行高效的并行计算
+        thought_state = initial_state.view(B * self.num_modes, self.embed_dim)
+        gru_input = torch.zeros_like(thought_state)
+        # gru_input = history_intent_embeddings[:, :7, :].mean(dim=1).unsqueeze(1).expand(-1, self.num_modes, -1)
+        gru_input = gru_input.reshape(B * self.num_modes, self.embed_dim)
+        
+        states = []
+        # --- 步骤 4: 自回归循环 ---
+        last_pose = torch.zeros(B * self.num_modes, 3, device=thought_state.device, dtype=thought_state.dtype)
+
+        # 存储最终拼接好的、在全局坐标系下的轨迹段
+        absolute_segments = []
+        for i in range(self.num_segments):
+            # a) 更新思考状态
+            thought_state = self.gru_cell(gru_input, thought_state)
+            # thought_state = self.attn_layer(gru_input, thought_state, thought_state)[0]
+            # b) 规划：决定下一步意图 (路由到专家)
+            thought_state_q = thought_state.view(B, self.num_modes, self.embed_dim)
+            context_output = self.query_attn[i](src=thought_state_q, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+            rich_thought_state = self.context_norm(thought_state_q + context_output).squeeze(1)
+            
+
+            expert_logits = self.gating_network(rich_thought_state) # (B*K, num_experts)
+            states.append(expert_logits)
+
+            segment_output_flat = self._moe_execution(rich_thought_state.view(B * self.num_modes, self.embed_dim),None, expert_logits.view(B * self.num_modes, -1))
+            
+            local_segment = segment_output_flat.view(B * self.num_modes, self.future_steps, 2)
+
+            # b) 准备拼接所需的姿态信息
+            # last_pose[:, 0] 是 x, [:, 1] 是 y, [:, 2] 是 heading
+            last_x = last_pose[:, 0].unsqueeze(1)
+            last_y = last_pose[:, 1].unsqueeze(1)
+            last_heading = last_pose[:, 2]
+
+            # c) 实施旋转 + 平移
+            cos_h = torch.cos(last_heading)
+            sin_h = torch.sin(last_heading)
+
+            # 旋转矩阵 (批量)
+            # rot_mat 的形状是 (B*K, 2, 2)
+            rot_mat = torch.stack([
+                torch.stack([cos_h, -sin_h], dim=1),
+                torch.stack([sin_h, cos_h], dim=1)
+            ], dim=1)
+
+            # 将局部轨迹旋转到正确的朝向
+            # (B*K, Steps, 2) @ (B*K, 2, 2) -> (B*K, Steps, 2)
+            # 我们需要调整维度以进行批量矩阵乘法
+            # (B*K, Steps, 1, 2) @ (B*K, 1, 2, 2) -> (B*K, Steps, 1, 2)
+            rotated_segment = (local_segment.unsqueeze(2) @ rot_mat.unsqueeze(1)).squeeze(2)
+
+            # 将旋转后的轨迹平移到正确的起点
+            # (B*K, Steps, 2) + (B*K, 1, 2)
+            global_segment = rotated_segment + torch.stack([last_x, last_y], dim=-1)
+            
+            absolute_segments.append(global_segment)
+
+            # d) 更新下一轮的 "last_pose"
+            # 新的位置是这一段的最后一个点
+            new_x = global_segment[:, -1, 0]
+            new_y = global_segment[:, -1, 1]
+            
+            # 新的朝向可以通过最后两个点的位置来近似计算
+            # 为避免除以零，添加一个小的epsilon
+            prev_point = global_segment[:, -2, :]
+            last_point = global_segment[:, -1, :]
+            delta = last_point - prev_point
+            new_heading = torch.atan2(delta[:, 1], delta[:, 0])
+
+            last_pose = torch.stack([new_x, new_y, new_heading], dim=1)
+
+
+        # --- 步骤 5: 拼接和整理输出 ---
+        # 将分段列表堆叠起来
+        # List[(B*K, steps*2)] -> (S, B*K, steps*2)
+        trajectories_flat = torch.cat(absolute_segments, dim=1)
+        
+        # (B*K, T, 2) -> (B, K, T, 2)
+        final_predictions = trajectories_flat.view(B, self.num_modes, self.future_len, 2)
+        states = torch.stack(states, dim=2)
+        # states = states.reshape(B, -1, self.embed_dim)
+        return {
+            "predictions": final_predictions, # (B, K, T, 2)
+            "pi": mode_logits,            # (B, K)
+            "segment_logits_per_mode": states,
+            "states": states
+        }
+    def _moe_execution(self, state: torch.Tensor,map_context: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        """
+        高效、向量化的 MoE 执行函数。
+
+        Args:
+            state (torch.Tensor): 当前的思考状态, 形状 (N, D)，其中 N = B * K。
+            logits (torch.Tensor): 门控网络输出的 logits, 形状 (N, num_experts)。
+
+        Returns:
+            torch.Tensor: 加权求和后的轨迹段输出, 形状 (N, future_steps * 2)。
+        """
+        # 1. 选择 Top-K 专家及其权重
+        probs = F.softmax(logits, dim=-1)
+        # top_k_probs: (N, top_k), top_k_indices: (N, top_k)
+        top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
+        # 归一化权重
+        top_k_probs = F.normalize(top_k_probs, p=1, dim=-1)
+
+        # 2. 准备分发 (Dispatch)
+        # 创建一个扁平化的索引，指明每个 "token-expert" 对属于哪个专家
+        # (N, top_k) -> (N * top_k)
+        flat_indices = top_k_indices.view(-1)
+        
+        # 将输入状态重复 top_k 次，以匹配扁平化的索引
+        # (N, D) -> (N * top_k, D)
+        repeated_state = state.repeat_interleave(self.top_k, dim=0)
+
+        # 3. 批量执行专家网络
+        # 初始化一个空的输出张量
+        y_flat = torch.zeros(
+            state.shape[0] * self.top_k, 
+            self.future_steps * 2, 
+            device=state.device,
+            dtype=state.dtype
+        )
+        
+        # 这个循环遍历专家数量 (e.g., 9)，而不是批次大小
+        for i in range(self.num_experts):
+            # 找到所有分配给当前专家 i 的任务
+            mask = (flat_indices == i)
+            
+            if mask.any():
+                # 收集所有需要该专家处理的输入状态
+                expert_inputs = repeated_state[mask]
+                expert_inputs_map = None
                 # 一次性地送入专家网络进行计算
                 expert_outputs = self.experts[i](expert_inputs.unsqueeze(1), expert_inputs_map)
                 # 将结果放回扁平化的输出张量中
