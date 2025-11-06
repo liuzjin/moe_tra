@@ -959,26 +959,20 @@ class RegressionSegmentDecoder(nn.Module):
             states.append(expert_logits)
 
             segment_output_flat = self._moe_execution(rich_thought_state.view(B * self.num_modes, self.embed_dim),map_context, expert_logits.view(B * self.num_modes, -1))
-            segment_output_flat = segment_output_flat.reshape(B * self.num_modes, self.future_steps, 2)
-            segment_output_flat = segment_output_flat + last_endpoint
             
-            future_segments.append(segment_output_flat)
-            last_endpoint = segment_output_flat[:, -1, :].unsqueeze(1)
-            segment_output_flat = segment_output_flat.reshape(B * self.num_modes, self.future_steps*2)
-            
+            future_segments.append(segment_output_flat.reshape(B * self.num_modes, self.future_steps, 2))
+
             # d) 更新：将生成的轨迹段编码，作为下一次GRU的输入
             gru_input = self.segment_embedder(segment_output_flat)
 
         # --- 步骤 5: 拼接和整理输出 ---
         # 将分段列表堆叠起来
         # List[(B*K, steps*2)] -> (S, B*K, steps*2)
-        stacked_segments = torch.stack(future_segments, dim=1)
+        stacked_segments = torch.cat(future_segments, dim=1)
         
         # 调整形状为最终轨迹格式
         # (S, B*K, steps*2) -> (B*K, S, steps*2) -> (B*K, T, 2)
-        trajectories_flat = stacked_segments.reshape(
-            B * self.num_modes, self.future_len, 2
-        )
+        trajectories_flat = torch.cumsum(stacked_segments, dim=1)
         
         # (B*K, T, 2) -> (B, K, T, 2)
         final_predictions = trajectories_flat.view(B, self.num_modes, self.future_len, 2)

@@ -458,7 +458,7 @@ class MoeLightningModule(BaseLightningModule):
         # c) 分段意图分类损失 (Gating Loss for Segments)
         segment_gating_loss = torch.tensor(0.0, device=gt_traj.device)
         # 只在训练时、且开启了意图标签模式、且数据中真的有标签时，才计算
-        if self.intent_label and 'intent' in data:
+        if self.intent_label:
             gt_intent_seq = data.get('intent') # (B, S)
             gt_intent_seq = gt_intent_seq[:, 0, :]
             if gt_intent_seq is not None:
@@ -472,6 +472,11 @@ class MoeLightningModule(BaseLightningModule):
                     best_segment_logits.reshape(-1, self.num_experts), 
                     gt_intent_seq.reshape(-1)
                 )
+        else:
+            segment_probs_per_mode = torch.softmax(segment_logits_per_mode, dim=-1)
+            avg_expert_usage = torch.mean(segment_probs_per_mode, dim=[0, 1])
+            segment_gating_loss = torch.mean(torch.sum(avg_expert_usage**2, dim=1)) * self.num_experts
+
 
         # d) 其他智能体的回归损失 (保持不变)
         others_reg_loss = torch.tensor(0.0, device=gt_traj.device)
@@ -480,28 +485,17 @@ class MoeLightningModule(BaseLightningModule):
                 others_reg_loss = F.smooth_l1_loss(
                     y_hat_others[others_reg_mask], y_others[others_reg_mask]
                 )
-        aux_loss = torch.tensor(0.0, device=gt_traj.device)
-        if not self.intent_label:
-            # (B, K, S, N)
-            segment_probs_per_mode = F.softmax(out['y_hat']['segment_logits_per_mode'], dim=-1)
-            # 对 K 和 B 维度取平均，得到每个分段S对每个专家N的使用频率
-            # (S, N)
-            avg_usage = torch.mean(segment_probs_per_mode, dim=[0, 1])
-            # 鼓励使用率的平方和最小，即鼓励均匀分布
-            aux_loss = torch.mean(avg_usage**2) * self.num_experts
 
         # --- 4. 计算总损失 ---
         # 权重 g_weight_mode, g_weight_segment, o_weight 是需要调整的超参数
         g_weight_mode = 0.0
         g_weight_segment = 1.0
-        aux_weight = 1.0
         o_weight = 1.0 # 其他智能体的损失权重
 
         
         total_loss = (regression_loss + 
                     g_weight_mode * mode_gating_loss + 
                     g_weight_segment * segment_gating_loss +
-                    aux_weight * aux_loss +
                     o_weight * others_reg_loss)
         
         # --- 5. 构建日志字典 ---
