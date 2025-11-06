@@ -1150,7 +1150,7 @@ class RegressionSegmentDecoder2(nn.Module):
         )
 
 
-    def forward(self, history_intent_embeddings,hist_seg,key_padding_mask=None,lane_mask=None):
+     def forward(self, history_intent_embeddings,hist_seg,key_padding_mask=None,lane_mask=None):
         """
         Args:
             history_intent_embeddings (torch.Tensor): 编码器输出的历史意图序列。
@@ -1200,8 +1200,49 @@ class RegressionSegmentDecoder2(nn.Module):
             
             local_segment = segment_output_flat.view(B * self.num_modes, self.future_steps, 2)
 
+            # b) 准备拼接所需的姿态信息
+            # last_pose[:, 0] 是 x, [:, 1] 是 y, [:, 2] 是 heading
+            last_x = last_pose[:, 0].unsqueeze(1)
+            last_y = last_pose[:, 1].unsqueeze(1)
+            last_heading = last_pose[:, 2]
+
+            # c) 实施旋转 + 平移
+            cos_h = torch.cos(last_heading)
+            sin_h = torch.sin(last_heading)
+
+            # 旋转矩阵 (批量)
+            # rot_mat 的形状是 (B*K, 2, 2)
+            rot_mat = torch.stack([
+                torch.stack([cos_h, -sin_h], dim=1),
+                torch.stack([sin_h, cos_h], dim=1)
+            ], dim=1)
+
+            # 将局部轨迹旋转到正确的朝向
+            # (B*K, Steps, 2) @ (B*K, 2, 2) -> (B*K, Steps, 2)
+            # 我们需要调整维度以进行批量矩阵乘法
+            # (B*K, Steps, 1, 2) @ (B*K, 1, 2, 2) -> (B*K, Steps, 1, 2)
+            rotated_segment = (local_segment.unsqueeze(2) @ rot_mat.unsqueeze(1)).squeeze(2)
+
+            # 将旋转后的轨迹平移到正确的起点
+            # (B*K, Steps, 2) + (B*K, 1, 2)
+            global_segment = rotated_segment + torch.stack([last_x, last_y], dim=-1)
             
-            absolute_segments.append(local_segment)
+            absolute_segments.append(global_segment)
+
+            # d) 更新下一轮的 "last_pose"
+            # 新的位置是这一段的最后一个点
+            new_x = global_segment[:, -1, 0]
+            new_y = global_segment[:, -1, 1]
+            
+            # 新的朝向可以通过最后两个点的位置来近似计算
+            # 为避免除以零，添加一个小的epsilon
+            prev_point = global_segment[:, -2, :]
+            last_point = global_segment[:, -1, :]
+            delta = last_point - prev_point
+            new_heading = torch.atan2(delta[:, 1], delta[:, 0])
+
+            last_pose = torch.stack([new_x, new_y, new_heading], dim=1)
+
 
         # --- 步骤 5: 拼接和整理输出 ---
         # 将分段列表堆叠起来
