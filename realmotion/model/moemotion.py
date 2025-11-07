@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  HierarchicalDecoder, MoE_QueryDecoder, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
+from .layers.multimodal_decoder import  HierarchicalDecoder, MoE_QueryDecoder, MultiModalIntentDecoder, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
 from .layers.transformer_blocks import Block, InterBlock, InteractionModule
 
 
@@ -46,15 +46,15 @@ class MoeMotion(nn.Module):
         self.future_len = future_len
         self.future_seg =  future_len// future_steps
         
-        self.hist_embed = AgentEmbeddingLayer(
+        self.hist_embed = AgentEmbeddingLayer_light(
             6, embed_dim // 8, drop_path_rate=drop_path,
             kernel_size=kernel_size,depths=depths,num_heads=his_num_heads,
             out_indices=out_indices,moe=his_embed_moe
         )
         if history_len == 50:
-            self.num_segments = 7 + 1
+            self.num_segments = 7 
         elif history_len == 30:
-            self.num_segments = 4 + 1
+            self.num_segments = 4 
         self.segment_pos_embed = nn.Parameter(
             torch.randn(1, 1, self.num_segments, embed_dim)
         )
@@ -171,6 +171,16 @@ class MoeMotion(nn.Module):
                     mlp_drop=mlp_drop,
                     query_cross_layers=query_cross_layers,
                     )
+            elif moe_type == "intent_linear":
+                self.decoder = MultiModalIntentDecoder(
+                    embed_dim=embed_dim,
+                    num_intents = num_experts,       # 意图表大小 K
+                    future_steps=future_len,      # T
+                    num_modes = modes,          # M (e.g., 6 for Argoverse2)
+                    mlp_ratio = mlp_ratio,
+                    qkv_bias = qkv_bias,
+                    query_cross_layers=2
+                            )
         else:
             self.decoder = MultimodalDecoder(embed_dim, future_steps,self.num_segments)
         self.dense_predictor = nn.Sequential(
@@ -298,7 +308,7 @@ class MoeMotion(nn.Module):
 
         if self.moe:
             y_hat = self.decoder(x_encoder, segment, key_padding_mask=~key_valid_mask, lane_mask=~data['lane_key_valid_mask'])
-            x_mode = y_hat['states']
+            # x_mode = y_hat['states']
         else:
             x_agent = x_encoder[:, :segment]
             y_hat = self.decoder(x_agent)

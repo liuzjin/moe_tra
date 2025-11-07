@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torchmetrics import MetricCollection
 from torch.nn.utils.rnn import pad_sequence
 from realmotion.metrics import MR, minADE, minFDE, brier_minFDE
+from realmotion.metrics.lapulas import LaplaceNLLLoss
 from realmotion.utils.optim import WarmupCosLR
 from realmotion.utils.submission_av2 import SubmissionAv2
 
@@ -679,6 +680,130 @@ class Hierarchical_Moe(MoeLightningModule):
         }
 
         return total_loss, loss_dict
+
+class Intent_linearModule(MoeLightningModule):
+    def __init__(self,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.laplace_loss = LaplaceNLLLoss()
+        self.val_metrics_new = self.metrics.clone(prefix="val_new_")
+    
+    def validation_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
+        out = self(data, False)
+        _, loss_dict = self.cal_loss(out, data)
+
+        self.log_dict({f"val/{k}": v for k, v in loss_dict.items()}, 
+                    on_step=False, on_epoch=True, sync_dist=True)
+
+        out = {
+            'y_hat': out['y_hat']['y_hat'],
+            'pi': out['y_hat']['pi'],
+            'new_y_hat': out['y_hat']['new_y_hat'],
+            'new_pi': out['y_hat']['new_pi'],
+        }
+
+        metrics = self.metrics(out, data['target'][:, 0])
+        if out['new_y_hat'] is not None:
+            out['y_hat'] = out['new_y_hat']
+            out['pi'] = out['new_pi']
+        if out['new_y_hat'] is not None:
+            metrics_new = self.val_metrics_new(out, data['target'][:, 0])
+
+        self.log_dict(
+            metrics,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=1,
+            sync_dist=True,
+        )
+        if out['new_y_hat'] is not None:
+            self.log_dict(
+                metrics_new,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+                batch_size=1,
+                sync_dist=True,
+            )
+
+    def cal_loss(self, out, data):
+        y_hat, pi, y_hat_others = out["y_hat"]['y_hat'], out["y_hat"]["pi"], out["y_hat_others"]
+        scal, scal_new = out["y_hat"]["scal"], out["y_hat"]["scal_new"]
+        new_y_hat = out["y_hat"].get("new_y_hat", None)
+        new_pi = out["y_hat"].get("new_pi", None)
+        dense_predict = out["y_hat"].get("dense_predict", None)
+
+        # gt
+        y, y_others = data["target"][:, 0], data["target"][:, 1:]
+
+        # loss for output of state query
+        if dense_predict is not None:
+            dense_reg_loss = F.smooth_l1_loss(dense_predict, y)
+        else:
+            dense_reg_loss = 0
+
+        # loss for output of mode query
+        l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+        best_mode = torch.argmin(l2_norm, dim=-1)
+        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
+        agent_cls_loss = F.cross_entropy(pi, best_mode.detach(), label_smoothing=0.2)
+        
+        # loss for final output
+        if new_y_hat is not None:
+            l2_norm_new = torch.norm(new_y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+            best_mode_new = torch.argmin(l2_norm_new, dim=-1)
+            new_y_hat_best = new_y_hat[torch.arange(new_y_hat.shape[0]), best_mode_new]
+            new_agent_reg_loss = F.smooth_l1_loss(new_y_hat_best[..., :2], y)
+        else:
+            new_agent_reg_loss = 0
+        if new_pi is not None:
+            new_pi_reg_loss = F.cross_entropy(new_pi, best_mode_new.detach(), label_smoothing=0.2)
+        else:
+            new_pi_reg_loss = 0
+
+        # loss for other agents
+        others_reg_mask = data["target_mask"][:, 1:]
+        others_reg_loss = F.smooth_l1_loss(
+            y_hat_others[others_reg_mask], y_others[others_reg_mask]
+        )
+
+        # Laplace loss, which is not necessary
+        predictions = {}
+        predictions['traj'] = y_hat
+        predictions['scale'] = scal
+        predictions['probs'] = pi
+        laplace_loss = self.laplace_loss.compute(predictions, y)
+
+        predictions['traj'] = new_y_hat
+        predictions['scale'] = scal_new
+        predictions['probs'] = new_pi
+        laplace_loss_new = self.laplace_loss.compute(predictions, y)
+
+        # total loss
+        loss = agent_reg_loss + agent_cls_loss + others_reg_loss + \
+                new_agent_reg_loss + dense_reg_loss + new_pi_reg_loss
+        loss = loss + laplace_loss + laplace_loss_new
+
+        disp_dict = {
+            "loss": loss.item(),
+            "reg_loss": agent_reg_loss.item(),
+            "cls_loss": agent_cls_loss.item(),
+            "others_reg_loss": others_reg_loss.item(),
+            "laplace_loss": laplace_loss.item(),
+            "laplace_loss_new": laplace_loss_new.item(),
+        }
+        if new_y_hat is not None:
+            disp_dict["reg_loss_refine"] = new_agent_reg_loss.item()
+        if new_pi is not None:
+            disp_dict["reg_loss_new_pi"] = new_pi_reg_loss.item()
+        if dense_predict is not None:
+            disp_dict["reg_loss_dense"] = dense_reg_loss.item()
+
+        return loss, disp_dict
 
 class Cross_moe_mlp_Module(BaseLightningModule):
     def __init__(self,

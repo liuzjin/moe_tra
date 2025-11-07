@@ -1162,9 +1162,9 @@ class RegressionSegmentDecoder2(nn.Module):
         queries = self.mode_queries.expand(B, -1, -1) # (B, K, D)
         
         for blk in self.query_init:
-            initial_state = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
+            queries = blk(src=queries, src_kv=history_intent_embeddings, key_padding_mask=key_padding_mask)
         
-        initial_state = self.history_norm(initial_state) # (B, K, D)
+        initial_state = self.history_norm(queries) # (B, K, D)
 
         # --- 步骤 2: 预测全局模态概率 ---
         # 基于对历史的初始理解，直接预测每个模态的可能性
@@ -1900,3 +1900,199 @@ class QuerrySegmentDecoder(nn.Module):
         final_output = torch.sum(weighted_y, dim=1)
         
         return final_output
+
+class GMMPredictor_dense(nn.Module):
+    def __init__(self, future_len=60, dim=128):
+        super(GMMPredictor_dense, self).__init__()
+        self._future_len = future_len
+        self.gaussian = nn.Sequential(
+            nn.Linear(dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 2)
+        )
+        self.score = nn.Sequential(
+            nn.Linear(dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 1),
+        )
+        self.scale = nn.Sequential(
+            nn.Linear(dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 2)
+        )
+    
+    def forward(self, input):
+        res = self.gaussian(input)
+        scal = F.elu_(self.scale(input), alpha=1.0) + 1.0 + 0.0001
+        input = input.max(dim=2)[0]  
+        score = self.score(input).squeeze(-1)
+
+        return res, score, scal
+
+
+class GMMPredictor(nn.Module):
+    def __init__(self, future_len=60, dim=128):
+        super(GMMPredictor, self).__init__()
+        self._future_len = future_len
+        self.gaussian = nn.Sequential(
+            nn.Linear(dim, 256), 
+            nn.GELU(), 
+            nn.Linear(256, self._future_len*2)
+        )
+        self.score = nn.Sequential(
+            nn.Linear(dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 1),
+        )
+        self.scale = nn.Sequential(
+            nn.Linear(dim, 256), 
+            nn.GELU(), 
+            nn.Linear(256, self._future_len*2)
+        )
+    
+    def forward(self, input):
+        B, M, _ = input.shape
+        res = self.gaussian(input).view(B, M, self._future_len, 2) 
+        scal = F.elu_(self.scale(input), alpha=1.0) + 1.0 + 0.0001
+        scal = scal.view(B, M, self._future_len, 2) 
+        score = self.score(input).squeeze(-1)
+
+        return res, score, scal
+        
+class MultiModalIntentDecoder(nn.Module):
+    def __init__(
+        self,
+        embed_dim=256,
+        num_intents = 8,       # 意图表大小 K
+        future_steps=60,      # T
+        num_modes = 6,          # M (e.g., 6 for Argoverse2)
+        output_dim= 2,
+        num_heads = 8,
+        mlp_ratio = 4.0,
+        qkv_bias = False,
+        drop = 0.2,
+        attn_drop = 0.2,
+        drop_path= 0.2,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        query_cross_layers=2
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.future_steps = future_steps
+        self.num_modes = num_modes
+        self.output_dim = output_dim
+
+        # === 共享组件 ===
+        self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
+        nn.init.xavier_uniform_(self.intent_bank)
+
+        self.mode_queries = nn.Parameter(torch.randn( self.num_modes, self.embed_dim))
+        
+
+        # 可学习的时间嵌入 [T, D]
+        self.time_embedding_mlp = nn.Sequential(
+            nn.Linear(1, 64), nn.GELU(), nn.Linear(64, embed_dim)
+        )
+        self.query_mode =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
+        self.query_intent =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
+        self.intent_mode_querry =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
+
+
+        self.predictor = GMMPredictor(future_steps)
+        self.predictor_dense = GMMPredictor_dense(future_steps)
+        # 5. 温度（可选固定或可学习）
+        self.temp = 1.0  # 或设为 nn.Parameter(torch.tensor(1.0))
+
+    def forward(
+        self,
+        context: torch.Tensor,      # [B, N, D]
+        segment: int,   # [B, 2]
+        key_padding_mask=None,
+        lane_mask=None,
+    ):
+        """
+        Returns:
+            trajectories: [B, M, T, 2]  # M 条未来轨迹
+            confidences:  [B, M]       # 每条轨迹的未归一化置信度（logits）
+        """
+        B = context.shape[0]
+
+        # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
+        mode = self.mode_queries.expand(B, -1, -1) # (B, K, D)
+        
+        for blk in self.query_mode:
+            mode = blk(src=mode, src_kv=context, key_padding_mask=key_padding_mask)
+        y_hat, pi, scal = self.predictor(mode)
+        y_hat = torch.cumsum(y_hat, dim=-2)
+        scal = torch.cumsum(scal, dim=-2)
+
+        time = torch.arange(60).long().to(context.device)
+        time = time * 0.1 + 0.1
+        time = time.unsqueeze(-1)
+        intent = self.time_embedding_mlp(time)
+        intent = intent.repeat(context.size(0), 1, 1)
+
+        for blk in self.query_intent:
+            intent = blk(src=intent, src_kv=context, key_padding_mask=key_padding_mask)
+        
+
+        mode_dense = mode[:, :, None] + intent[:, None, :]
+        B, M, T, C = mode_dense.shape
+        
+        mode_dense = mode_dense.reshape(B, -1, C)
+        for blk in self.intent_mode_querry:
+            mode_dense = blk(src=mode_dense, src_kv=context, key_padding_mask=key_padding_mask)
+        mode_dense = mode_dense.reshape(B, M, T, C)
+
+        # Step 4: 软查询意图表 → 每个 (b,m,t) 得到意图嵌入
+        # logits: [B, M, T, K]
+        logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
+        weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
+        intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+
+        y_hat_dense, pi_dense, scal_dense = self.predictor_dense(intent_seq)  # [B, M, T, 2]
+
+        # 累加得到绝对坐标
+        y_hat_dense = torch.cumsum(y_hat_dense, dim=2)  # [B, M, T, 2]
+        scal_dense = torch.cumsum(scal_dense, dim=2)
+
+
+        return {
+        "y_hat": y_hat,      # [B, M, T, 2]
+        "pi": pi,              # [B, M]
+        "scal": scal,             # [B, M, T, 2]
+        "new_y_hat": y_hat_dense, # [B, M, T, 2]
+        "new_pi": pi_dense,         # [B, M]
+        "scal_new": scal_dense         # [B, M, T, 2]
+    }

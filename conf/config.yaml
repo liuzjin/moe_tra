@@ -8,10 +8,15 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_I
 
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_moe_regres
+
 defaults:
   - _self_
   - datamodule: av2_moe
-  - model: MoeMotion_moe_regres
+  - model: MoeMotion_Linear
 
 # defaults:
 #   - _self_
