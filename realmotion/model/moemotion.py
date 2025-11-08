@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  HierarchicalDecoder, MoE_QueryDecoder, MultiModalIntentDecoder, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
+from .layers.multimodal_decoder import  HierarchicalDecoder, MoE_QueryDecoder, MultiModalIntentDecoder, MultiModalIntentDecoder2, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
 from .layers.transformer_blocks import Block, InterBlock, InteractionModule
 
 
@@ -172,7 +172,7 @@ class MoeMotion(nn.Module):
                     query_cross_layers=query_cross_layers,
                     )
             elif moe_type == "intent_linear":
-                self.decoder = MultiModalIntentDecoder(
+                self.decoder = MultiModalIntentDecoder2(
                     embed_dim=embed_dim,
                     num_intents = num_experts,       # 意图表大小 K
                     future_steps=future_len,      # T

@@ -2096,3 +2096,102 @@ class MultiModalIntentDecoder(nn.Module):
         "new_pi": pi_dense,         # [B, M]
         "scal_new": scal_dense         # [B, M, T, 2]
     }
+
+class MultiModalIntentDecoder2(nn.Module):
+    def __init__(
+        self,
+        embed_dim=256,
+        num_intents = 8,       # 意图表大小 K
+        future_steps=60,      # T
+        num_modes = 6,          # M (e.g., 6 for Argoverse2)
+        output_dim= 2,
+        num_heads = 8,
+        mlp_ratio = 4.0,
+        qkv_bias = False,
+        drop = 0.2,
+        attn_drop = 0.2,
+        drop_path= 0.2,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        query_cross_layers=2
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.future_steps = future_steps
+        self.num_modes = num_modes
+        self.output_dim = output_dim
+
+        # === 共享组件 ===
+        self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
+        nn.init.xavier_uniform_(self.intent_bank)
+
+
+        # 可学习的时间嵌入 [T, D]
+        self.time_embedding_mlp = nn.Sequential(
+            nn.Linear(1, 64), nn.GELU(), nn.Linear(64, embed_dim)
+        )
+        self.query_mode =nn.Sequential(
+            nn.Linear(7, 256), 
+            nn.GELU(), 
+            nn.Linear(256, self.num_modes)
+        )
+        self.query_intent =nn.Sequential(
+            nn.Linear(7, 256), 
+            nn.GELU(), 
+            nn.Linear(256, self.future_steps)
+        )
+
+
+        self.predictor = GMMPredictor(future_steps)
+        self.predictor_dense = GMMPredictor_dense(future_steps)
+        # 5. 温度（可选固定或可学习）
+        self.temp = 1.0  # 或设为 nn.Parameter(torch.tensor(1.0))
+
+    def forward(
+        self,
+        context: torch.Tensor,      # [B, N, D]
+        segment: int,   # [B, 2]
+        key_padding_mask=None,
+        lane_mask=None,
+    ):
+        """
+        Returns:
+            trajectories: [B, M, T, 2]  # M 条未来轨迹
+            confidences:  [B, M]       # 每条轨迹的未归一化置信度（logits）
+        """
+        B = context.shape[0]
+
+        # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
+        mode = self.query_mode(context[:,:7,...].reshape(B, -1, 7))
+        mode = mode.reshape(B, self.num_modes, -1)
+
+        y_hat, pi, scal = self.predictor(mode)
+        y_hat = torch.cumsum(y_hat, dim=-2)
+        scal = torch.cumsum(scal, dim=-2)
+
+
+        intent = self.query_intent(context[:,:7,...].reshape(B, -1, 7))
+        intent = intent.reshape(B, self.future_steps, -1)
+
+
+        mode_dense = mode[:, :, None] + intent[:, None, :]
+        
+        logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
+        weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
+        intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+
+        y_hat_dense, pi_dense, scal_dense = self.predictor_dense(intent_seq)  # [B, M, T, 2]
+
+        # 累加得到绝对坐标
+        y_hat_dense = torch.cumsum(y_hat_dense, dim=2)  # [B, M, T, 2]
+        scal_dense = torch.cumsum(scal_dense, dim=2)
+
+
+        return {
+        "y_hat": y_hat,      # [B, M, T, 2]
+        "pi": pi,              # [B, M]
+        "scal": scal,             # [B, M, T, 2]
+        "new_y_hat": y_hat_dense, # [B, M, T, 2]
+        "new_pi": pi_dense,         # [B, M]
+        "scal_new": scal_dense         # [B, M, T, 2]
+    }
