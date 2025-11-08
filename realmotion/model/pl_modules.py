@@ -734,8 +734,7 @@ class Intent_linearModule(MoeLightningModule):
         scal, scal_new = out["y_hat"]["scal"], out["y_hat"]["scal_new"]
         new_y_hat = out["y_hat"].get("new_y_hat", None)
         new_pi = out["y_hat"].get("new_pi", None)
-        dense_predict = out["y_hat"].get("dense_predict", None)
-        dense_predict = out["y_hat"].get("dense_predict", None)
+        dense_predict = out["y_hat"].get("dense_pred", None)
 
         # gt
         y, y_others = data["target"][:, 0], data["target"][:, 1:]
