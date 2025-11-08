@@ -46,13 +46,13 @@ class MoeMotion(nn.Module):
         self.future_len = future_len
         self.future_seg =  future_len// future_steps
         
-        self.hist_embed = AgentEmbeddingLayer_light(
+        self.hist_embed = AgentEmbeddingLayer(
             6, embed_dim // 8, drop_path_rate=drop_path,
             kernel_size=kernel_size,depths=depths,num_heads=his_num_heads,
             out_indices=out_indices,moe=his_embed_moe
         )
         if history_len == 50:
-            self.num_segments = 7 
+            self.num_segments = 7 + 1  
         elif history_len == 30:
             self.num_segments = 4 
         self.segment_pos_embed = nn.Parameter(
@@ -172,7 +172,7 @@ class MoeMotion(nn.Module):
                     query_cross_layers=query_cross_layers,
                     )
             elif moe_type == "intent_linear":
-                self.decoder = MultiModalIntentDecoder2(
+                self.decoder = MultiModalIntentDecoder(
                     embed_dim=embed_dim,
                     num_intents = num_experts,       # 意图表大小 K
                     future_steps=future_len,      # T

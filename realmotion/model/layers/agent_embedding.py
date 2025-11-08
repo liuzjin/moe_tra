@@ -93,7 +93,7 @@ class AgentEmbeddingLayer(nn.Module):
         
         out = torch.cat([out1, out2[:,:,-1:]], dim=-1)
 
-        # return out[:, :, -1]
+        # return out[:, :, -1:].permute(0, 2, 1).contiguous()
         return out.permute(0, 2, 1).contiguous()
     
 class AgentEmbeddingLayer_light(nn.Module):

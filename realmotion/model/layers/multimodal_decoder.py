@@ -2028,7 +2028,16 @@ class MultiModalIntentDecoder(nn.Module):
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
 
-
+        self.dense_predict = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.GELU(),
+            nn.LayerNorm(256),
+            nn.Linear(256, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, 64),
+            nn.GELU(),
+            nn.Linear(64, 2),
+        )
         self.predictor = GMMPredictor(future_steps)
         self.predictor_dense = GMMPredictor_dense(future_steps)
         # 5. 温度（可选固定或可学习）
@@ -2066,6 +2075,8 @@ class MultiModalIntentDecoder(nn.Module):
         for blk in self.query_intent:
             intent = blk(src=intent, src_kv=context, key_padding_mask=key_padding_mask)
         
+        dense_pred = self.dense_predict(intent)
+        dense_pred = torch.cumsum(dense_pred, dim=-2)
 
         mode_dense = mode[:, :, None] + intent[:, None, :]
         B, M, T, C = mode_dense.shape
@@ -2089,6 +2100,7 @@ class MultiModalIntentDecoder(nn.Module):
 
 
         return {
+        "dense_pred":dense_pred,
         "y_hat": y_hat,      # [B, M, T, 2]
         "pi": pi,              # [B, M]
         "scal": scal,             # [B, M, T, 2]
