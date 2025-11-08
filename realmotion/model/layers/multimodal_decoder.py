@@ -1989,6 +1989,12 @@ class MultiModalIntentDecoder(nn.Module):
 
         self.mode_queries = nn.Parameter(torch.randn( self.num_modes, self.embed_dim))
         
+        self.gate_network = nn.Sequential(
+            nn.Linear(self.embed_dim * 2, self.embed_dim),  # 输入维度是 embed_dim*2，因为拼接了 mode 和 intent
+            nn.ReLU(),
+            nn.Linear(self.embed_dim, 1),
+            nn.Sigmoid()  # 输出一个介于0和1之间的门控值
+        )
 
         # 可学习的时间嵌入 [T, D]
         self.time_embedding_mlp = nn.Sequential(
@@ -2079,6 +2085,11 @@ class MultiModalIntentDecoder(nn.Module):
         dense_pred = torch.cumsum(dense_pred, dim=-2)
 
         mode_dense = mode[:, :, None] + intent[:, None, :]
+        # mode = mode.unsqueeze(2).expand(-1, -1, self.future_steps, -1)
+        # intent = intent.unsqueeze(1).expand(-1, self.num_modes, -1, -1)
+        # gate_input = torch.cat([mode, intent], dim=-1)
+        # gate = self.gate_network(gate_input)
+        # mode_dense = gate * mode + (1 - gate) * intent
         B, M, T, C = mode_dense.shape
         
         mode_dense = mode_dense.reshape(B, -1, C)
@@ -2103,7 +2114,13 @@ class MultiModalIntentDecoder(nn.Module):
         identity = torch.eye(self.intent_bank.shape[0], device=sim_matrix.device)
         diversity_loss = ((sim_matrix - identity) ** 2).mean()
 
+        temporal_diff = torch.diff(weights, dim=2)  # [B, M, T-1, K]
+        consistency_loss = torch.mean(temporal_diff ** 2)
+        sparsity_loss = torch.mean(weights ** 2)  # L2 稀疏
+        consis_sparse_loss = consistency_loss + 0.1 * sparsity_loss
+
         return {
+        "consis_sparse_loss": consis_sparse_loss,
         "diversity_loss":diversity_loss,
         "dense_pred":dense_pred,
         "y_hat": y_hat,      # [B, M, T, 2]
