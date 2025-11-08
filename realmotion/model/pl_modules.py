@@ -735,6 +735,7 @@ class Intent_linearModule(MoeLightningModule):
         new_y_hat = out["y_hat"].get("new_y_hat", None)
         new_pi = out["y_hat"].get("new_pi", None)
         dense_predict = out["y_hat"].get("dense_pred", None)
+        diversity_loss= out['y_hat'].get("diversity_loss", 0)
 
         # gt
         y, y_others = data["target"][:, 0], data["target"][:, 1:]
@@ -785,7 +786,7 @@ class Intent_linearModule(MoeLightningModule):
 
         # total loss
         loss = agent_reg_loss + agent_cls_loss + others_reg_loss + \
-                new_agent_reg_loss + dense_reg_loss + new_pi_reg_loss
+                new_agent_reg_loss + dense_reg_loss + new_pi_reg_loss + diversity_loss
         loss = loss + laplace_loss + laplace_loss_new
 
         disp_dict = {
@@ -795,6 +796,7 @@ class Intent_linearModule(MoeLightningModule):
             "others_reg_loss": others_reg_loss.item(),
             "laplace_loss": laplace_loss.item(),
             "laplace_loss_new": laplace_loss_new.item(),
+            "diversity_loss": diversity_loss.item(),
         }
         if new_y_hat is not None:
             disp_dict["reg_loss_refine"] = new_agent_reg_loss.item()
@@ -802,6 +804,8 @@ class Intent_linearModule(MoeLightningModule):
             disp_dict["reg_loss_new_pi"] = new_pi_reg_loss.item()
         if dense_predict is not None:
             disp_dict["reg_loss_dense"] = dense_reg_loss.item()
+        if diversity_loss != 0 :
+            disp_dict["diversity_loss"] = diversity_loss.item()
 
         return loss, disp_dict
 

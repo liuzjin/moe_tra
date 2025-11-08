@@ -52,7 +52,7 @@ class MoeMotion(nn.Module):
             out_indices=out_indices,moe=his_embed_moe
         )
         if history_len == 50:
-            self.num_segments =  7 + 1  
+            self.num_segments =  1  
         elif history_len == 30:
             self.num_segments = 4 
         self.segment_pos_embed = nn.Parameter(

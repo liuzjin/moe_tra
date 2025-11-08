@@ -49,7 +49,7 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 8
+gpus: 1
 batch_size: 32
 epochs: 60
 checkpoint: 
@@ -63,7 +63,7 @@ intent_label: True
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
-    filename: epoch_{epoch}-minADE6_{minADE6}
+    filename: epoch_{epoch}-minADE6_{new_minADE6}
     monitor: new_minADE6
     mode: min
     save_top_k: 10

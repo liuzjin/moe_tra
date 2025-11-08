@@ -2098,8 +2098,13 @@ class MultiModalIntentDecoder(nn.Module):
         y_hat_dense = torch.cumsum(y_hat_dense, dim=2)  # [B, M, T, 2]
         scal_dense = torch.cumsum(scal_dense, dim=2)
 
+        norm_bank = F.normalize(self.intent_bank, dim=-1)
+        sim_matrix = torch.mm(norm_bank, norm_bank.t())  # [K, K]
+        identity = torch.eye(self.intent_bank.shape[0], device=sim_matrix.device)
+        diversity_loss = ((sim_matrix - identity) ** 2).mean()
 
         return {
+        "diversity_loss":diversity_loss,
         "dense_pred":dense_pred,
         "y_hat": y_hat,      # [B, M, T, 2]
         "pi": pi,              # [B, M]
