@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1958,7 +1959,28 @@ class GMMPredictor(nn.Module):
         score = self.score(input).squeeze(-1)
 
         return res, score, scal
-        
+
+class VQIntentBank(nn.Module):
+    def __init__(self, K, D, beta=0.25):
+        super().__init__()
+        self.codebook = nn.Parameter(torch.randn(K, D))
+        nn.init.uniform_(self.codebook, -1/math.sqrt(D), 1/math.sqrt(D))
+        self.beta = beta
+        self.K = K
+    def forward(self, z):               # z: (B*M*T, D)
+        # 计算距离
+        d = (z.pow(2).sum(1, keepdim=True)
+             + self.codebook.pow(2).sum(1)
+             - 2 * z @ self.codebook.t())      # (BMT, K)
+        idx = d.argmin(1)                       # (BMT,)
+        z_q = F.embedding(idx, self.codebook)   # (BMT, D)
+        # commitment loss
+        loss = F.mse_loss(z_q.detach(), z) + \
+               self.beta * F.mse_loss(z_q, z.detach())
+        # straight-through estimator
+        z_q = z + (z_q - z).detach()
+        return z_q.view_as(z), idx.view(-1), loss
+
 class MultiModalIntentDecoder(nn.Module):
     def __init__(
         self,
@@ -1984,18 +2006,12 @@ class MultiModalIntentDecoder(nn.Module):
         self.output_dim = output_dim
 
         # === 共享组件 ===
-        self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
-        nn.init.xavier_uniform_(self.intent_bank)
+        # self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
+        # nn.init.xavier_uniform_(self.intent_bank)
+        self.intent_bank = VQIntentBank(num_intents, embed_dim)
 
         self.mode_queries = nn.Parameter(torch.randn( self.num_modes, self.embed_dim))
         
-        self.gate_network = nn.Sequential(
-            nn.Linear(self.embed_dim * 2, self.embed_dim),  # 输入维度是 embed_dim*2，因为拼接了 mode 和 intent
-            nn.ReLU(),
-            nn.Linear(self.embed_dim, 1),
-            nn.Sigmoid()  # 输出一个介于0和1之间的门控值
-        )
-
         # 可学习的时间嵌入 [T, D]
         self.time_embedding_mlp = nn.Sequential(
             nn.Linear(1, 64), nn.GELU(), nn.Linear(64, embed_dim)
@@ -2048,6 +2064,11 @@ class MultiModalIntentDecoder(nn.Module):
         self.predictor_dense = GMMPredictor_dense(future_steps)
         # 5. 温度（可选固定或可学习）
         self.temp = 1.0  # 或设为 nn.Parameter(torch.tensor(1.0))
+        self.intent_res_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
 
     def forward(
         self,
@@ -2085,11 +2106,6 @@ class MultiModalIntentDecoder(nn.Module):
         dense_pred = torch.cumsum(dense_pred, dim=-2)
 
         mode_dense = mode[:, :, None] + intent[:, None, :]
-        # mode = mode.unsqueeze(2).expand(-1, -1, self.future_steps, -1)
-        # intent = intent.unsqueeze(1).expand(-1, self.num_modes, -1, -1)
-        # gate_input = torch.cat([mode, intent], dim=-1)
-        # gate = self.gate_network(gate_input)
-        # mode_dense = gate * mode + (1 - gate) * intent
         B, M, T, C = mode_dense.shape
         
         mode_dense = mode_dense.reshape(B, -1, C)
@@ -2099,9 +2115,17 @@ class MultiModalIntentDecoder(nn.Module):
 
         # Step 4: 软查询意图表 → 每个 (b,m,t) 得到意图嵌入
         # logits: [B, M, T, K]
-        logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
-        weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
-        intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+        # logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
+        # weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
+        # intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+
+        z = mode_dense.reshape(-1, C)          # (B*M*T, D)
+        z_q, idx, vq_loss = self.intent_bank(z)
+        idx = idx.reshape(B, M, T)
+        intent_seq = z_q.reshape(B, M, T, C)
+
+        intent_res = self.intent_res_mlp(intent_seq)     # (B,M,T,D)
+        intent_seq = mode_dense + intent_res              # 关键残差
 
         y_hat_dense, pi_dense, scal_dense = self.predictor_dense(intent_seq)  # [B, M, T, 2]
 
@@ -2109,20 +2133,22 @@ class MultiModalIntentDecoder(nn.Module):
         y_hat_dense = torch.cumsum(y_hat_dense, dim=2)  # [B, M, T, 2]
         scal_dense = torch.cumsum(scal_dense, dim=2)
 
-        norm_bank = F.normalize(self.intent_bank, dim=-1)
-        sim_matrix = torch.mm(norm_bank, norm_bank.t())  # [K, K]
-        identity = torch.eye(self.intent_bank.shape[0], device=sim_matrix.device)
-        diversity_loss = ((sim_matrix - identity) ** 2).mean()
+        # norm_bank = F.normalize(self.intent_bank, dim=-1)
+        # sim_matrix = torch.mm(norm_bank, norm_bank.t())  # [K, K]
+        # identity = torch.eye(self.intent_bank.shape[0], device=sim_matrix.device)
+        # diversity_loss = ((sim_matrix - identity) ** 2).mean()
 
-        temporal_diff = torch.diff(weights, dim=2)  # [B, M, T-1, K]
-        consistency_loss = torch.mean(temporal_diff ** 2)
-        sparsity_loss = torch.mean(weights ** 2)  # L2 稀疏
-        consis_sparse_loss = consistency_loss + 0.1 * sparsity_loss
+        # temporal_diff = torch.diff(weights, dim=2)  # [B, M, T-1, K]
+        # consistency_loss = torch.mean(temporal_diff ** 2)
+        # sparsity_loss = torch.mean(weights ** 2)  # L2 稀疏
+        # consis_sparse_loss = consistency_loss + 0.1 * sparsity_loss
 
         return {
-        "consis_sparse_loss": consis_sparse_loss,
-        "diversity_loss":diversity_loss,
-        "dense_pred":dense_pred,
+        "vq_loss": vq_loss,
+        "idx": idx,
+        "consis_sparse_loss": torch.tensor(0).to(y_hat.device),
+        "diversity_loss": torch.tensor(0).to(y_hat.device),
+        "dense_pred": dense_pred,
         "y_hat": y_hat,      # [B, M, T, 2]
         "pi": pi,              # [B, M]
         "scal": scal,             # [B, M, T, 2]
