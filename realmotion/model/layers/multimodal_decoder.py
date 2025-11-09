@@ -2064,11 +2064,11 @@ class MultiModalIntentDecoder(nn.Module):
         self.predictor_dense = GMMPredictor_dense(future_steps)
         # 5. 温度（可选固定或可学习）
         self.temp = 1.0  # 或设为 nn.Parameter(torch.tensor(1.0))
-        # self.intent_res_mlp = nn.Sequential(
-        #     nn.Linear(embed_dim, embed_dim),
-        #     nn.GELU(),
-        #     nn.Linear(embed_dim, embed_dim)
-        # )
+        self.intent_res_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
 
     def forward(
         self,
@@ -2123,8 +2123,8 @@ class MultiModalIntentDecoder(nn.Module):
         # z_q, idx, vq_loss = self.intent_bank(z)
         # idx = idx.reshape(B, M, T)
         # intent_seq = z_q.reshape(B, M, T, C)
-        # intent_res = self.intent_res_mlp(intent_seq)     # (B,M,T,D)
-        # intent_seq = mode_dense + intent_res              # 关键残差
+        intent_res = self.intent_res_mlp(intent_seq)     # (B,M,T,D)
+        intent_seq = mode_dense + intent_res              # 关键残差
 
         y_hat_dense, pi_dense, scal_dense = self.predictor_dense(intent_seq)  # [B, M, T, 2]
 
@@ -2132,22 +2132,8 @@ class MultiModalIntentDecoder(nn.Module):
         y_hat_dense = torch.cumsum(y_hat_dense, dim=2)  # [B, M, T, 2]
         scal_dense = torch.cumsum(scal_dense, dim=2)
 
-        # norm_bank = F.normalize(self.intent_bank, dim=-1)
-        # sim_matrix = torch.mm(norm_bank, norm_bank.t())  # [K, K]
-        # identity = torch.eye(self.intent_bank.shape[0], device=sim_matrix.device)
-        # diversity_loss = ((sim_matrix - identity) ** 2).mean()
-
-        # temporal_diff = torch.diff(weights, dim=2)  # [B, M, T-1, K]
-        # consistency_loss = torch.mean(temporal_diff ** 2)
-        # sparsity_loss = torch.mean(weights ** 2)  # L2 稀疏
-        # consis_sparse_loss = consistency_loss + 0.1 * sparsity_loss
-
         return {
         "mode": mode, 
-        "vq_loss": torch.tensor(0).to(y_hat.device),
-        "idx": torch.tensor(0).to(y_hat.device),
-        "consis_sparse_loss": torch.tensor(0).to(y_hat.device),
-        "diversity_loss": torch.tensor(0).to(y_hat.device),
         "dense_pred": dense_pred,
         "y_hat": y_hat,      # [B, M, T, 2]
         "pi": pi,              # [B, M]
