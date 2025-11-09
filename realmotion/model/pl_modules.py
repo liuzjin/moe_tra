@@ -294,96 +294,6 @@ class RegLightningModule(BaseLightningModule):
             sync_dist=True,
         )
 
-class StreamLightningModule(BaseLightningModule):
-    def __init__(self,
-                 num_grad_frame=3,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.num_grad_frame = num_grad_frame
-    
-    def training_step(self, data, batch_idx):
-        total_step = len(data)
-        num_grad_frames = min(self.num_grad_frame, total_step)
-        num_no_grad_frames = total_step - num_grad_frames
-
-        memory_dict = None
-        self.eval()
-        with torch.no_grad():
-            for i in range(num_no_grad_frames):
-                cur_data = data[i]
-                cur_data['memory_dict'] = memory_dict
-                out = self(cur_data, False)
-                memory_dict = out['memory_dict']
-        
-        self.train()
-        sum_loss = 0
-        loss_dict = {}
-        for i in range(num_grad_frames):
-            cur_data = data[i + num_no_grad_frames]
-            cur_data['memory_dict'] = memory_dict
-            out = self(cur_data, True)
-            out['pi'] = out['y_hat']['logits']
-            out['y_hat'] = out['y_hat']['predictions']
-            cur_loss, cur_loss_dict = self.cal_loss(out, cur_data, tag=f'step{i + num_no_grad_frames}_')
-            loss_dict.update(cur_loss_dict)
-            sum_loss += cur_loss
-            memory_dict = out['memory_dict']
-        loss_dict['loss'] = sum_loss.item()
-        for k, v in loss_dict.items():
-            self.log(
-                f'train/{k}',
-                v,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-            )
-        return sum_loss
-    
-    def validation_step(self, data, batch_idx):
-        memory_dict = None
-        reg_loss_dict = {}
-        all_outs = []
-        for i in range(len(data)):
-            cur_data = data[i]
-            cur_data['memory_dict'] = memory_dict
-            out = self(cur_data, False)
-            out['pi'] = out['y_hat']['logits']
-            out['y_hat'] = out['y_hat']['predictions']
-            _, cur_loss_dict = self.cal_loss(out, cur_data, tag=f'step{i}_')
-            reg_loss_dict[f'val/step{i}_reg_loss'] = cur_loss_dict[f'step{i}_reg_loss']
-            memory_dict = out['memory_dict']
-            all_outs.append(out)
-        
-        metrics = self.metrics(all_outs[-1], data[-1]['target'][:, 0])
-
-        self.log_dict(
-            reg_loss_dict,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            sync_dist=True,
-        )
-        self.log_dict(
-            metrics,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-            batch_size=1,
-            sync_dist=True,
-        )
-    
-    def test_step(self, data, batch_idx) -> None:
-        memory_dict = None
-        all_outs = []
-        for i in range(len(data)):
-            cur_data = data[i]
-            cur_data['memory_dict'] = memory_dict
-            out = self(cur_data)
-            memory_dict = out['memory_dict']
-            all_outs.append(out)
-        self.submission_handler.format_data(data[-1], all_outs[-1]['y_hat'], all_outs[-1]['pi'])
-
 
 class MoeLightningModule(BaseLightningModule):
     def __init__(self,
@@ -729,7 +639,7 @@ class Intent_linearModule(MoeLightningModule):
                 sync_dist=True,
             )
 
-    def cal_loss(self, out, data):
+    def cal_loss(self, out, data, tag=""):
         y_hat, pi, y_hat_others = out["y_hat"]['y_hat'], out["y_hat"]["pi"], out["y_hat_others"]
         scal, scal_new = out["y_hat"]["scal"], out["y_hat"]["scal_new"]
         new_y_hat = out["y_hat"].get("new_y_hat", None)
@@ -792,30 +702,139 @@ class Intent_linearModule(MoeLightningModule):
         loss = loss + laplace_loss + laplace_loss_new
 
         disp_dict = {
-            "loss": loss.item(),
-            "reg_loss": agent_reg_loss.item(),
-            "cls_loss": agent_cls_loss.item(),
-            "others_reg_loss": others_reg_loss.item(),
-            "laplace_loss": laplace_loss.item(),
-            "laplace_loss_new": laplace_loss_new.item(),
-            "diversity_loss": diversity_loss.item(),
-            "consis_sparse_loss": consis_sparse_loss.item(),
-            "vq_loss": vq_loss.item(),
+            f"{tag}loss": loss.item(),
+            f"{tag}reg_loss": agent_reg_loss.item(),
+            f"{tag}cls_loss": agent_cls_loss.item(),
+            f"{tag}others_reg_loss": others_reg_loss.item(),
+            f"{tag}laplace_loss": laplace_loss.item(),
+            f"{tag}laplace_loss_new": laplace_loss_new.item(),
         }
         if new_y_hat is not None:
-            disp_dict["reg_loss_refine"] = new_agent_reg_loss.item()
+            disp_dict[f"{tag}reg_loss_refine"] = new_agent_reg_loss.item()
         if new_pi is not None:
-            disp_dict["reg_loss_new_pi"] = new_pi_reg_loss.item()
+            disp_dict[f"{tag}reg_loss_new_pi"] = new_pi_reg_loss.item()
         if dense_predict is not None:
-            disp_dict["reg_loss_dense"] = dense_reg_loss.item()
+            disp_dict[f"{tag}reg_loss_dense"] = dense_reg_loss.item()
         if diversity_loss != 0 :
-            disp_dict["diversity_loss"] = diversity_loss.item()
+            disp_dict[f"{tag}diversity_loss"] = diversity_loss.item()
         if consis_sparse_loss != 0:
-            disp_dict["consis_sparse_loss"] = consis_sparse_loss.item()
+            disp_dict[f"{tag}consis_sparse_loss"] = consis_sparse_loss.item()
         if vq_loss != 0:
-            disp_dict["vq_loss"] = vq_loss.item()
+            disp_dict[f"{tag}vq_loss"] = vq_loss.item()
 
         return loss, disp_dict
+
+class StreamLightningModule(Intent_linearModule):
+    def __init__(self,
+                 num_grad_frame=3,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.num_grad_frame = num_grad_frame
+    
+    def training_step(self, data, batch_idx):
+        total_step = len(data)
+        num_grad_frames = min(self.num_grad_frame, total_step)
+        num_no_grad_frames = total_step - num_grad_frames
+
+        memory_dict = None
+        self.eval()
+        with torch.no_grad():
+            for i in range(num_no_grad_frames):
+                cur_data = data[i]
+                cur_data['memory_dict'] = memory_dict
+                out = self(cur_data, False)
+                memory_dict = out['memory_dict']
+        
+        self.train()
+        sum_loss = 0
+        loss_dict = {}
+        for i in range(num_grad_frames):
+            cur_data = data[i + num_no_grad_frames]
+            cur_data['memory_dict'] = memory_dict
+            out = self(cur_data, True)
+            cur_loss, cur_loss_dict = self.cal_loss(out, cur_data, f'{i}_')
+            loss_dict.update(cur_loss_dict)
+            sum_loss += cur_loss
+            memory_dict = out['memory_dict']
+        loss_dict['loss'] = sum_loss.item()
+        for k, v in loss_dict.items():
+            self.log(
+                f'train/{k}',
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
+        return sum_loss
+    
+    def validation_step(self, data, batch_idx):
+        memory_dict = None
+        reg_loss_dict = {}
+        all_outs = []
+        for i in range(len(data)):
+            cur_data = data[i]
+            cur_data['memory_dict'] = memory_dict
+            out = self(cur_data, False)
+            _, cur_loss_dict = self.cal_loss(out, cur_data,f'{i}_')
+            reg_loss_dict.update(cur_loss_dict)
+            memory_dict = out['memory_dict']
+            all_outs.append(out)
+        
+
+        out = {
+            'y_hat': all_outs[-1]['y_hat']['y_hat'],
+            'pi': all_outs[-1]['y_hat']['pi'],
+            'new_y_hat': all_outs[-1]['y_hat']['new_y_hat'],
+            'new_pi': all_outs[-1]['y_hat']['new_pi'],
+        }
+
+        metrics = self.metrics(out, data[-1]['target'][:, 0])
+        if out['new_y_hat'] is not None:
+            out['y_hat'] = out['new_y_hat']
+            out['pi'] = out['new_pi']
+        if out['new_y_hat'] is not None:
+            metrics_new = self.val_metrics_new(out, data[-1]['target'][:, 0])
+
+        for k, v in reg_loss_dict.items():
+            self.log(
+                f'val/{k}',
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
+        self.log_dict(
+            metrics,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=1,
+            sync_dist=True,
+        )
+        if out['new_y_hat'] is not None:
+            self.log_dict(
+                metrics_new,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+                batch_size=1,
+                sync_dist=True,
+            )
+    
+    def test_step(self, data, batch_idx) -> None:
+        memory_dict = None
+        all_outs = []
+        for i in range(len(data)):
+            cur_data = data[i]
+            cur_data['memory_dict'] = memory_dict
+            out = self(cur_data)
+            memory_dict = out['memory_dict']
+            all_outs.append(out)
+        self.submission_handler.format_data(data[-1], all_outs[-1]['y_hat'], all_outs[-1]['pi'])
+
+
 
 class Cross_moe_mlp_Module(BaseLightningModule):
     def __init__(self,

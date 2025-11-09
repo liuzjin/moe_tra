@@ -2006,9 +2006,9 @@ class MultiModalIntentDecoder(nn.Module):
         self.output_dim = output_dim
 
         # === 共享组件 ===
-        # self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
-        # nn.init.xavier_uniform_(self.intent_bank)
-        self.intent_bank = VQIntentBank(num_intents, embed_dim)
+        self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
+        nn.init.xavier_uniform_(self.intent_bank)
+        # self.intent_bank = VQIntentBank(num_intents, embed_dim)
 
         self.mode_queries = nn.Parameter(torch.randn( self.num_modes, self.embed_dim))
         
@@ -2064,11 +2064,11 @@ class MultiModalIntentDecoder(nn.Module):
         self.predictor_dense = GMMPredictor_dense(future_steps)
         # 5. 温度（可选固定或可学习）
         self.temp = 1.0  # 或设为 nn.Parameter(torch.tensor(1.0))
-        self.intent_res_mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU(),
-            nn.Linear(embed_dim, embed_dim)
-        )
+        # self.intent_res_mlp = nn.Sequential(
+        #     nn.Linear(embed_dim, embed_dim),
+        #     nn.GELU(),
+        #     nn.Linear(embed_dim, embed_dim)
+        # )
 
     def forward(
         self,
@@ -2115,17 +2115,16 @@ class MultiModalIntentDecoder(nn.Module):
 
         # Step 4: 软查询意图表 → 每个 (b,m,t) 得到意图嵌入
         # logits: [B, M, T, K]
-        # logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
-        # weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
-        # intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+        logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
+        weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
+        intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
 
-        z = mode_dense.reshape(-1, C)          # (B*M*T, D)
-        z_q, idx, vq_loss = self.intent_bank(z)
-        idx = idx.reshape(B, M, T)
-        intent_seq = z_q.reshape(B, M, T, C)
-
-        intent_res = self.intent_res_mlp(intent_seq)     # (B,M,T,D)
-        intent_seq = mode_dense + intent_res              # 关键残差
+        # z = mode_dense.reshape(-1, C)          # (B*M*T, D)
+        # z_q, idx, vq_loss = self.intent_bank(z)
+        # idx = idx.reshape(B, M, T)
+        # intent_seq = z_q.reshape(B, M, T, C)
+        # intent_res = self.intent_res_mlp(intent_seq)     # (B,M,T,D)
+        # intent_seq = mode_dense + intent_res              # 关键残差
 
         y_hat_dense, pi_dense, scal_dense = self.predictor_dense(intent_seq)  # [B, M, T, 2]
 
@@ -2144,8 +2143,9 @@ class MultiModalIntentDecoder(nn.Module):
         # consis_sparse_loss = consistency_loss + 0.1 * sparsity_loss
 
         return {
-        "vq_loss": vq_loss,
-        "idx": idx,
+        "mode": mode, 
+        "vq_loss": torch.tensor(0).to(y_hat.device),
+        "idx": torch.tensor(0).to(y_hat.device),
         "consis_sparse_loss": torch.tensor(0).to(y_hat.device),
         "diversity_loss": torch.tensor(0).to(y_hat.device),
         "dense_pred": dense_pred,

@@ -51,10 +51,8 @@ class MoeMotion(nn.Module):
             kernel_size=kernel_size,depths=depths,num_heads=his_num_heads,
             out_indices=out_indices,moe=his_embed_moe
         )
-        if history_len == 50:
-            self.num_segments =  1  
-        elif history_len == 30:
-            self.num_segments = 4 
+        self.num_segments =  1  
+
         self.segment_pos_embed = nn.Parameter(
             torch.randn(1, 1, self.num_segments, embed_dim)
         )
@@ -306,9 +304,10 @@ class MoeMotion(nn.Module):
             x_encoder = blk(x_encoder, key_padding_mask=~key_valid_mask)
         x_encoder = self.norm(x_encoder)
 
+
         if self.moe:
             y_hat = self.decoder(x_encoder, segment, key_padding_mask=~key_valid_mask, lane_mask=~data['lane_key_valid_mask'])
-            # x_mode = y_hat['states']
+            x_mode = y_hat['mode']
         else:
             x_agent = x_encoder[:, :segment]
             y_hat = self.decoder(x_agent)
@@ -333,25 +332,24 @@ class MoeMotion(nn.Module):
                 memory_y_hat = torch.bmm(
                     (memory_y_hat - memory_traj_ori).reshape(B, -1, 2), rot_mat
                 ).reshape(B, memory_y_hat.size(1), -1, 2)
-                predictions = y_hat['predictions'].detach()
-                traj_embed = self.traj_embed(predictions.reshape(B, predictions.size(1), -1))
+                
+                traj_embed = self.traj_embed(y_hat['y_hat'].detach().reshape(B, y_hat['y_hat'].size(1), -1))
                 memory_traj_embed = self.traj_embed(memory_y_hat.reshape(B, memory_y_hat.size(1), -1))
                 
                 for modfus in self.mode_fusion:
                     x_mode = modfus(x_mode, memory_x_mode, cur_pose, memory_pose,
                                     cur_pos_embed=traj_embed,
                                     memory_pos_embed=memory_traj_embed)
-                y_hat_diff = self.stream_loc(x_mode).reshape(B, memory_y_hat.size(1), -1, 2)
-                y_hat['predictions'] = y_hat['predictions'] + y_hat_diff
-        
+                y_hat_diff = self.stream_loc(x_mode).reshape(B, y_hat['y_hat'].size(1), -1, 2)
+                y_hat['y_hat'] = y_hat['y_hat'] + y_hat_diff
         
         ret_dict = {
             'y_hat': y_hat,
             'y_hat_others': y_hat_others,
         }
         if isinstance(self, StreamModelForecast):
-            glo_y_hat = torch.bmm(y_hat['predictions'].detach().reshape(B, -1, 2), torch.inverse(rot_mat))
-            glo_y_hat = glo_y_hat.reshape(B, y_hat['predictions'].size(1), -1, 2)
+            glo_y_hat = torch.bmm(y_hat['y_hat'].detach().reshape(B, -1, 2), torch.inverse(rot_mat))
+            glo_y_hat = glo_y_hat.reshape(B, y_hat['y_hat'].size(1), -1, 2)
 
             memory_dict = {
                 "x_encoder": x_encoder,

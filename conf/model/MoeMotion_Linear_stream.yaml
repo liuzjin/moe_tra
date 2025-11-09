@@ -1,0 +1,40 @@
+tag: MoeMotion_Linear_stream
+
+pl_module:
+  _target_: realmotion.model.pl_modules.StreamLightningModule
+  intent_label: ${intent_label}
+  num_experts: ${num_experts}
+  top_k: ${top_k}
+  n_step: ${n_step}
+  model:
+    _target_: realmotion.model.moemotion.StreamModelForecast
+    embed_dim: 128
+    mlp_dim: 128
+    history_len: ${history_len}
+    future_steps: ${n_step}
+    future_len: ${future_len}
+    encoder_depth: 4
+    num_heads: 8
+    mlp_ratio: 4.0
+    qkv_bias: False
+    drop_path: 0.2
+    mlp_drop: 0.0
+    moe: True
+    his_embed_moe: [True, True, True, True]
+    moe_type: "intent_linear"
+    query_cross_layers: 2
+    query_self_atten: True
+    query_self_layers: 1
+    num_experts: ${num_experts}
+    top_k: ${top_k}
+    intent_label: ${intent_label}
+    kernel_size: [3, 3, 5, 3]
+    depths: [2, 2, 2, 2]
+    his_num_heads: [2, 4, 8, 16]
+    out_indices: [0, 1, 2, 3]
+  optim:
+    lr: 2.0e-3
+    weight_decay: 1e-2
+    min_lr: 1e-5
+    epochs: ${epochs}
+    warmup_ratio: 0.167

@@ -13,10 +13,15 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_regres
 
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_Linear
+
 defaults:
   - _self_
-  - datamodule: av2_moe
-  - model: MoeMotion_Linear
+  - datamodule: av2_moe_stream
+  - model: MoeMotion_Linear_stream
 
 # defaults:
 #   - _self_
@@ -56,7 +61,7 @@ checkpoint:
 submit:
 n_step: 20
 top_k: 2
-num_experts: 12
+num_experts: 9
 future_len: 60
 history_len: 50
 intent_label: True
