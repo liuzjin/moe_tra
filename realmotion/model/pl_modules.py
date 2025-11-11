@@ -596,6 +596,60 @@ class Hierarchical_Moe(MoeLightningModule):
 
         return total_loss, loss_dict
 
+class MultiScaleDisplacementLoss(nn.Module):
+    """
+    输入：模型输出的相对位移  [B, M, T, 2]  （T=60）
+          真值相对位移      [B, T, 2]
+    输出：4 个尺度的平滑 L1 损失 + 自动融合总损失
+    """
+    def __init__(self, scales=[1, 2, 4, 8], temperature=4.0):
+        super().__init__()
+        self.scales = scales  # 时间步长
+        self.temperature = temperature
+        # 可学习融合权重（4 个尺度）
+        self.fusion_w =  nn.Parameter(torch.ones(len(scales)))
+
+    def forward(self, pred_disp, gt_disp):
+        """
+        pred_disp: [B, M, T, 2]  相对位移
+        gt_disp:   [B, T, 2]     真值相对位移
+        """
+        B, M, T, _ = pred_disp.shape
+        total_loss = 0.0
+        scale_losses = []
+
+        # 取最佳模态（与你现有逻辑一致）
+        with torch.no_grad():
+            l2 = torch.norm(pred_disp - gt_disp.unsqueeze(1), dim=-1).sum(-1)  # [B, M]
+            best_mode = torch.argmin(l2, dim=-1)  # [B]
+        best_pred = pred_disp[torch.arange(B), best_mode]  # [B, T, 2]
+
+        fusion_weight = F.softmax(self.fusion_w / self.temperature, dim=0)
+
+        for i, delta in enumerate(self.scales):
+            # 构造多尺度真值
+            gt_scale = self._make_scale(gt_disp, delta)        # [B, T//delta, 2]
+            pred_scale = self._make_scale(best_pred, delta)    # [B, T//delta, 2]
+
+            loss_scale = F.smooth_l1_loss(pred_scale, gt_scale, reduction='mean')
+            scale_losses.append(loss_scale)
+            total_loss += fusion_weight[i] * loss_scale
+
+        return total_loss, scale_losses
+
+    @staticmethod
+    def _make_scale(disp, delta):
+        """把每 delta 步的位移累加，形成粗粒度位移"""
+        T = disp.shape[1]
+        if delta == 1:
+            return disp
+        # 截断到 delta 的整数倍
+        T_new = T // delta * delta
+        disp = disp[:, :T_new, :]
+        #  reshape 后沿时间轴累加
+        disp = disp.reshape(disp.shape[0], -1, delta, 2).sum(dim=2)  # [B, T//delta, 2]
+        return disp
+
 class Intent_linearModule(MoeLightningModule):
     def __init__(self,
                  **kwargs):
@@ -609,6 +663,7 @@ class Intent_linearModule(MoeLightningModule):
             'best_modes': [],          # [B]
             'intent_assignments': []   # 每个样本的主导意图
         }
+        self.ms_disp_loss = MultiScaleDisplacementLoss(scales=[1, 2, 4, 8])
     def plot_intent_attention_over_time(self, attention_weights, ground_truth_modes=None):
         """
         attention_weights: [batch, future_steps, num_intents]
@@ -1010,10 +1065,22 @@ class Intent_linearModule(MoeLightningModule):
         new_y_hat = out["y_hat"].get("new_y_hat", None)
         new_pi = out["y_hat"].get("new_pi", None)
         dense_predict = out["y_hat"].get("dense_pred", None)
-        vq_loss =0.1* out["y_hat"].get("vq_loss", 0)
 
         # gt
         y, y_others = data["target"][:, 0], data["target"][:, 1:]
+
+
+        abs_traj = new_y_hat      # [B, M, T, 2]
+        rel_pred = abs_traj[:, :, 1:] - abs_traj[:, :, :-1]  # [B, M, T-1, 2]
+        rel_pred = F.pad(rel_pred, (0, 0, 1, 0), "constant", 0.0)  # 补零对齐
+
+        # 真值相对位移
+        gt_traj = y             # [B, T, 2]
+        rel_gt = gt_traj[:, 1:] - gt_traj[:, :-1]
+        rel_gt = F.pad(rel_gt, (0, 0, 1, 0), "constant", 0.0)
+
+        # ---- 多尺度位移损失 ----
+        ms_loss, scale_losses = self.ms_disp_loss(rel_pred, rel_gt)
 
         # loss for output of state query
         if dense_predict is not None:
@@ -1028,8 +1095,6 @@ class Intent_linearModule(MoeLightningModule):
         agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
         agent_cls_loss = F.cross_entropy(pi, best_mode.detach(), label_smoothing=0.2)
         
-        # self.plot_intent_attention_over_time(out['y_hat']['weights'][torch.arange(y_hat.shape[0]), best_mode])
-        # loss for final output
         if new_y_hat is not None:
             l2_norm_new = torch.norm(new_y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
             best_mode_new = torch.argmin(l2_norm_new, dim=-1)
@@ -1062,10 +1127,11 @@ class Intent_linearModule(MoeLightningModule):
 
         # total loss
         loss = agent_reg_loss + agent_cls_loss + others_reg_loss + \
-                new_agent_reg_loss + dense_reg_loss + new_pi_reg_loss +  vq_loss 
-        loss = loss + laplace_loss + laplace_loss_new
+                new_agent_reg_loss + dense_reg_loss + new_pi_reg_loss 
+        loss = loss + laplace_loss + laplace_loss_new + ms_loss
 
         disp_dict = {
+            f"{tag}ms_loss": ms_loss.item(),
             f"{tag}loss": loss.item(),
             f"{tag}reg_loss": agent_reg_loss.item(),
             f"{tag}cls_loss": agent_cls_loss.item(),
@@ -1080,6 +1146,8 @@ class Intent_linearModule(MoeLightningModule):
         if dense_predict is not None:
             disp_dict[f"{tag}reg_loss_dense"] = dense_reg_loss.item()
 
+        for i in range(len(scale_losses)):
+            disp_dict[f"{tag}scale_loss_{i}"] = scale_losses[i].item()
 
         return loss, disp_dict
 
