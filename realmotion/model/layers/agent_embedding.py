@@ -61,8 +61,7 @@ class AgentEmbeddingLayer(nn.Module):
                 nn.Conv1d(self.num_features[i_layer], n, 3, padding=1)
             )
 
-        self.fpn_conv1 = nn.Conv1d(n, n, 3, padding=1)
-        self.fpn_conv2 = nn.Conv1d(n, n, 3, padding=1)
+        self.fpn_conv = nn.Conv1d(n, n, 3, padding=1)
 
 
     def forward(self, x):
@@ -88,7 +87,7 @@ class AgentEmbeddingLayer(nn.Module):
                 align_corners=False,
             )
 
-        out = self.fpn_conv2(laterals[0])
+        out = self.fpn_conv(laterals[0])
         return out[:, :, -1:].permute(0, 2, 1).contiguous()
     
 class AgentEmbeddingLayer_light(nn.Module):
