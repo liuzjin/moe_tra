@@ -1,7 +1,10 @@
+from collections import defaultdict
 import math
+import os
 from pathlib import Path
 import pickle
 import random
+from typing import Dict
 import pytorch_lightning as pl
 from realmotion.metrics.accuracy import CustomAccuracy
 import torch
@@ -13,7 +16,9 @@ from realmotion.metrics import MR, minADE, minFDE, brier_minFDE
 from realmotion.metrics.lapulas import LaplaceNLLLoss
 from realmotion.utils.optim import WarmupCosLR
 from realmotion.utils.submission_av2 import SubmissionAv2
-
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 class BaseLightningModule(pl.LightningModule):
     def __init__(
@@ -597,7 +602,367 @@ class Intent_linearModule(MoeLightningModule):
         super().__init__(**kwargs)
         self.laplace_loss = LaplaceNLLLoss()
         self.val_metrics_new = self.metrics.clone(prefix="new_")
+        self.validation_epoch_cache = {
+            'intent_weights': [],      # [B, num_modes, 60, num_intents]
+            'trajectory_preds': [],    # [B, num_modes, 60, 2]
+            'trajectory_gt': [],       # [B, 60, 2]
+            'best_modes': [],          # [B]
+            'intent_assignments': []   # 每个样本的主导意图
+        }
+    def plot_intent_attention_over_time(self, attention_weights, ground_truth_modes=None):
+        """
+        attention_weights: [batch, future_steps, num_intents]
+        ground_truth_modes: 可选，真实的模态标签
+        
+        """
+        
+
+        for batch_idx in range(attention_weights.shape[0]):
+        # batch_idx = 0  # 可视化第一个样本
+        
+        # 取softmax后的权重
+            weights = attention_weights[batch_idx].detach().cpu().numpy()  # [60, num_intents]
+            
+            # plt.figure(figsize=(14, 6))
+            
+            # # 热力图
+            # sns.heatmap(weights.T, 
+            #             cmap='YlOrRd', 
+            #             xticklabels=np.arange(0, 60, 5),
+            #             yticklabels=np.arange(weights.shape[1]),
+            #             cbar_kws={'label': 'Attention Weight'})
+            
+            # plt.title(f'Intent Attention Over Time - Sample {batch_idx}')
+            # plt.xlabel('Future Time Step')
+            # plt.ylabel('Intent ID')
+            
+            # # 如果有真值，标注出来
+            # if ground_truth_modes is not None:
+            #     true_mode = ground_truth_modes[batch_idx]
+            #     plt.axhline(y=true_mode, color='blue', linestyle='--', 
+            #             label=f'Ground Truth Mode: {true_mode}')
+            #     plt.legend()
+            
+            # plt.tight_layout()
+            # plt.savefig(f'{batch_idx}intent_attention_timeline.png', dpi=150)
+            # plt.show()
+            
+            # 统计：意图切换频率
+            intent_choice = np.argmax(weights, axis=1)
+            switches = np.sum(intent_choice[:-1] != intent_choice[1:])
+            print(f"{batch_idx}意图切换次数: {switches}/59 步")
     
+    def analyze_intent_traj_distribution(
+            self,
+            attention_weights: torch.Tensor,   # [B, M, T, K]
+            absolute_trajectory: torch.Tensor, # [B, M, T, 2]  ← 你的 new_y_hat
+            trajectory_gt: torch.Tensor,       # [B, T, 2]
+            best_modes: torch.Tensor,          # [B]
+            t_start: int = 0,                  # 可选：只分析 [t_start, t_end] 区间
+            t_end: int = 60,
+    ) -> Dict[str, float]:
+        """
+        只在相对位移空间度量同一意图下的预测一致性。
+        返回指标均基于位移，cumsum 后的终点仅作参考。
+        """
+        B, M, T, K = attention_weights.shape
+        device = attention_weights.device
+
+        # 1. 还原相对位移
+        rel_pred = absolute_trajectory[:, :, 1:t_end, :] - absolute_trajectory[:, :, 0:t_end-1, :]  # [B, M, T-1, 2]
+        # 补零对齐长度
+        rel_pred = F.pad(rel_pred, (0, 0, 1, 0), "constant", 0.0)  # [B, M, T, 2]
+
+        # 2. 真值相对位移
+        rel_gt = trajectory_gt[:, 1:t_end, :] - trajectory_gt[:, 0:t_end-1, :]
+        rel_gt = F.pad(rel_gt, (0, 0, 1, 0), "constant", 0.0)  # [B, T, 2]
+
+        # 3. 主导意图（最佳模态 + 时间平均）
+        dominant_intents = []
+        for b in range(B):
+            mode_idx = best_modes[b].item()
+            # 时间维度平均权重 → [K]
+            mode_weights = attention_weights[b, mode_idx, t_start:t_end].mean(dim=0)
+            dominant_intent = torch.argmax(mode_weights).item()
+            dominant_intents.append(dominant_intent)
+
+        # 4. 按意图聚合相对位移
+        intent_disp_cache = defaultdict(list)   # 相对位移
+        intent_endpoint_cache = defaultdict(list)  # cumsum 后终点（仅参考）
+
+        for b in range(B):
+            intent_id = dominant_intents[b]
+            mode_idx = best_modes[b].item()
+
+            # 相对位移
+            disp = rel_pred[b, mode_idx].detach().cpu()  # [T, 2]
+            intent_disp_cache[intent_id].append(disp)
+
+            # cumsum 后终点（仅参考）
+            abs_traj = absolute_trajectory[b, mode_idx].detach().cpu()
+            endpoint = abs_traj[-1, :2].numpy()
+            intent_endpoint_cache[intent_id].append(endpoint)
+
+        # 5. 位移空间统计
+        metrics = {}
+        all_disp_vars = []        # 每意图位移方差
+        all_endpoint_stds = []    # 每意图终点方差（参考）
+
+        for intent_id in range(K):
+            disps = intent_disp_cache[intent_id]
+            if len(disps) < 3:
+                metrics[f'intent_{intent_id}_disp_var'] = 0.0
+                metrics[f'intent_{intent_id}_endpoint_std'] = 0.0
+                metrics[f'intent_{intent_id}_usage_count'] = len(disps)
+                continue
+
+            # 位移方差：逐时间步求方差再平均
+            disp_tensor = torch.stack(disps, dim=0)  # [N, T, 2]
+            per_step_var = torch.var(disp_tensor, dim=0).mean(dim=-1)  # [T]
+            avg_disp_var = per_step_var.mean().item()
+            all_disp_vars.append(avg_disp_var)
+
+            # 终点方差（参考）
+            endpoints = np.stack(intent_endpoint_cache[intent_id], axis=0)
+            endpoint_std = np.std(endpoints, axis=0).mean()
+            all_endpoint_stds.append(endpoint_std)
+
+            metrics[f'intent_{intent_id}_disp_var'] = avg_disp_var
+            metrics[f'intent_{intent_id}_endpoint_std'] = endpoint_std
+            metrics[f'intent_{intent_id}_usage_count'] = len(disps)
+
+        # 6. 全局统计
+        if all_disp_vars:
+            metrics['avg_displacement_var'] = np.mean(all_disp_vars)
+            metrics['max_displacement_var'] = np.max(all_disp_vars)
+            metrics['avg_endpoint_std'] = np.mean(all_endpoint_stds)
+            metrics['intent_usage_entropy'] = self._compute_usage_entropy(
+                [metrics[f'intent_{i}_usage_count'] for i in range(K)]
+            )
+
+        # 7. 位移方差阈值（cumsum 场景）
+        if metrics['avg_displacement_var'] > 0.08:
+            print(f"🔴 位移方差 {metrics['avg_displacement_var']:.3f} 过高 "
+                f"→ 同一意图下相对位移差异大，路由失效")
+        else:
+            print(f"✅ 位移方差 {metrics['avg_displacement_var']:.3f} 正常 "
+                f"→ 相对位移一致性良好")
+
+        return metrics
+    def _compute_usage_entropy(self, usage_counts):
+        """计算意图使用分布的熵"""
+        total = sum(usage_counts)
+        if total == 0:
+            return 0.0
+        probs = [count / total for count in usage_counts if count > 0]
+        entropy = -sum(p * np.log(p) for p in probs)
+        return entropy
+
+    # ==================== 可视化方法 ====================
+
+    def visualize_intent_traj_distribution(self, 
+                                         intent_endpoint_cache: Dict[int, np.ndarray],
+                                         epoch: int,
+                                         save_dir: str = 'val_diagnostics'):
+        """可视化每个意图的终点分布"""
+        os.makedirs(save_dir, exist_ok=True)
+        
+        fig, axes = plt.subplots(4, 8, figsize=(32, 16))  # 假设32个意图
+        axes = axes.flatten()
+        
+        for intent_id, endpoints in intent_endpoint_cache.items():
+            if len(endpoints) < 2:
+                continue
+            
+            endpoints = np.stack(endpoints, axis=0)  # [N, 2]
+            
+            ax = axes[intent_id]
+            scatter = ax.scatter(endpoints[:, 0], endpoints[:, 1], 
+                               alpha=0.6, s=20, c=range(len(endpoints)), 
+                               cmap='viridis')
+            ax.set_title(f'Intent {intent_id}\nN={len(endpoints)}', fontsize=10)
+            ax.grid(True, alpha=0.3)
+            ax.set_aspect('equal')
+        
+        # 隐藏未使用的子图
+        for i in range(len(intent_endpoint_cache), len(axes)):
+            axes[i].set_visible(False)
+        
+        plt.suptitle(f'Intent-wise Endpoint Distribution - Epoch {epoch}', 
+                    fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        
+        save_path = os.path.join(save_dir, f'intent_endpoints_epoch_{epoch}.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        
+        return save_path
+
+    # ==================== 重写validation_step ====================
+
+    # def validation_step(self, data, batch_idx):
+    #     if isinstance(data, list):
+    #         data = data[-1]
+        
+    #     # 1. 前向传播（启用中间输出）
+    #     out = self(data, False)
+        
+    #     # 2. 计算损失
+    #     loss, loss_dict = self.cal_loss(out, data)
+        
+    #     # 3. 提取关键数据用于诊断
+    #     # attention_weights形状: [B, num_modes, 60, num_intents]
+    #     attention_weights = out['y_hat']['weights']
+    #     trajectory_preds = out['y_hat']['y_hat']  # [B, num_modes, 60, 2]
+    #     trajectory_gt = data['target'][:, 0]  # [B, 60, 2]
+        
+    #     # 获取最佳模态（用于归因）
+    #     with torch.no_grad():
+    #         l2_norm = torch.norm(trajectory_preds[..., :2] - trajectory_gt.unsqueeze(1), 
+    #                            dim=-1).sum(dim=-1)  # [B, num_modes]
+    #         best_modes = torch.argmin(l2_norm, dim=-1)  # [B]
+        
+    #     # 4. 进行意图-轨迹分布分析
+    #     distrib_metrics = self.analyze_intent_traj_distribution(
+    #         attention_weights, trajectory_preds, trajectory_gt, best_modes
+    #     )
+        
+    #     # 5. 缓存数据（用于epoch结束时的全局分析）
+    #     self.validation_epoch_cache['intent_weights'].append(attention_weights.detach().cpu())
+    #     self.validation_epoch_cache['trajectory_preds'].append(trajectory_preds.detach().cpu())
+    #     self.validation_epoch_cache['trajectory_gt'].append(trajectory_gt.detach().cpu())
+    #     self.validation_epoch_cache['best_modes'].append(best_modes.detach().cpu())
+        
+    #     # 6. 记录指标（分离scalar和分布统计）
+    #     scalar_metrics = {f"val/{k}": v for k, v in loss_dict.items()}
+        
+    #     # 分布统计指标（使用专门的prefix）
+    #     distrib_metrics = {f"val/distrib/{k}": v for k, v in distrib_metrics.items()}
+        
+    #     # 合并记录
+    #     self.log_dict(scalar_metrics, 
+    #                  on_step=False, on_epoch=True, sync_dist=True)
+    #     self.log_dict(distrib_metrics, 
+    #                  on_step=False, on_epoch=True, sync_dist=True)
+        
+    #     # 7. 原始验证逻辑（计算ADE/FDE）
+    #     out_for_metrics = {
+    #         'y_hat': out['y_hat']['y_hat'],
+    #         'pi': out['y_hat']['pi'],
+    #         'new_y_hat': out['y_hat']['new_y_hat'],
+    #         'new_pi': out['y_hat']['new_pi'],
+    #     }
+        
+    #     metrics = self.metrics(out_for_metrics, data['target'][:, 0])
+        
+    #     if out_for_metrics['new_y_hat'] is not None:
+    #         out_for_metrics['y_hat'] = out_for_metrics['new_y_hat']
+    #         out_for_metrics['pi'] = out_for_metrics['new_pi']
+    #         metrics_new = self.val_metrics_new(out_for_metrics, data['target'][:, 0])
+    #         self.log_dict(metrics_new, 
+    #                      prog_bar=True, on_step=False, on_epoch=True, 
+    #                      batch_size=1, sync_dist=True)
+        
+    #     self.log_dict(metrics, 
+    #                  prog_bar=True, on_step=False, on_epoch=True, 
+    #                  batch_size=1, sync_dist=True)
+
+    # ==================== 重写on_validation_epoch_end ====================
+
+    # def on_validation_epoch_end(self):
+    #     """在验证epoch结束时生成全局分析报告"""
+    #     if not self.validation_epoch_cache['intent_weights']:
+    #         return
+        
+    #     print(f"\n{'='*80}")
+    #     print(f"VALIDATION EPOCH {self.current_epoch} - INTENT TRAJECTORY DISTRIBUTION REPORT")
+    #     print(f"{'='*80}")
+        
+    #     # 1. 聚合所有批次的数据
+    #     all_weights = torch.cat(self.validation_epoch_cache['intent_weights'], dim=0)
+    #     all_preds = torch.cat(self.validation_epoch_cache['trajectory_preds'], dim=0)
+    #     all_gt = torch.cat(self.validation_epoch_cache['trajectory_gt'], dim=0)
+    #     all_best_modes = torch.cat(self.validation_epoch_cache['best_modes'], dim=0)
+        
+    #     # 2. 全局分布分析（在验证集上）
+    #     global_metrics = self.analyze_intent_traj_distribution(
+    #         all_weights,  # 增加batch维度
+    #         all_preds,
+    #         all_gt,
+    #         all_best_modes
+    #     )
+        
+    #     # 3. 打印关键诊断信息
+    #     print(f"\n📊 关键指标:")
+    #     print(f"  平均终点标准差: {global_metrics.get('avg_endpoint_std', 0):.3f}m")
+    #     print(f"  意图使用熵: {global_metrics.get('intent_usage_entropy', 0):.3f}")
+    #     print(f"  意图稳定性: {global_metrics.get('intent_stability_mean', 0):.3f}")
+        
+    #     # 4. 生成可视化（仅在前几个epoch和最后一个epoch）
+    #     if self.current_epoch in [0, 1, 2] or self.current_epoch == self.trainer.max_epochs - 1:
+    #         # 构建意图终点缓存用于可视化
+    #         intent_endpoint_cache = defaultdict(list)
+    #         batch_size = all_preds.shape[0]
+            
+    #         for b in range(batch_size):
+    #             mode_idx = all_best_modes[b]
+    #             intent_weights = all_weights[b, mode_idx].mean(dim=0)  # [num_intents]
+    #             dominant_intent = torch.argmax(intent_weights).item()
+                
+    #             endpoint = all_preds[b, mode_idx, -1, :2].numpy()
+    #             intent_endpoint_cache[dominant_intent].append(endpoint)
+            
+    #         # 生成并记录可视化
+    #         viz_path = self.visualize_intent_traj_distribution(
+    #             intent_endpoint_cache, 
+    #             self.current_epoch,
+    #             save_dir=os.path.join("./figures", 'diagnostics')
+    #         )
+            
+    #         if self.logger:
+    #             # 记录到TensorBoard
+    #             self.logger.experiment.add_image(
+    #                 'diagnostics/intent_endpoint_distribution',
+    #                 plt.imread(viz_path),
+    #                 self.current_epoch,
+    #                 dataformats='HWC'
+    #             )
+            
+    #         print(f"📈 可视化已保存: {viz_path}")
+        
+    #     # 5. 自动诊断与建议
+    #     self._auto_diagnose(global_metrics)
+        
+    #     # 6. 清空缓存
+    #     self.validation_epoch_cache = {
+    #         k: [] for k in self.validation_epoch_cache.keys()
+    #     }
+        
+    #     print(f"{'='*80}\n")
+
+    def _auto_diagnose(self, metrics: Dict[str, float]):
+        """自动分析并给出改进建议"""
+        print("\n💡 自动诊断与建议:")
+        
+        endpoint_std = metrics.get('avg_endpoint_std', 0)
+        if endpoint_std < 0.6:
+            print("  🔴 终点标准差过小 (< 0.6m)")
+            print("     → 建议: 增加专家网络容量或添加残差分支")
+            print("     → 参考: 实施方案G")
+        
+        usage_entropy = metrics.get('intent_usage_entropy', 0)
+        if usage_entropy < 2.0:
+            print("  🔴 意图使用熵过低 (< 2.0)")
+            print("     → 建议: 添加负载均衡损失或减少意图数量")
+            print("     → 参考: 实施方案B")
+        
+        stability = metrics.get('intent_stability_mean', 0)
+        if stability > 0.95:
+            print("  ⚠️  意图过于稳定 (> 0.95)")
+            print("     → 建议: 添加早期时间步的意图多样性损失")
+            print("     → 参考: 实施方案F")
+
+
     def validation_step(self, data, batch_idx):
         if isinstance(data, list):
             data = data[-1]
@@ -663,6 +1028,7 @@ class Intent_linearModule(MoeLightningModule):
         agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
         agent_cls_loss = F.cross_entropy(pi, best_mode.detach(), label_smoothing=0.2)
         
+        # self.plot_intent_attention_over_time(out['y_hat']['weights'][torch.arange(y_hat.shape[0]), best_mode])
         # loss for final output
         if new_y_hat is not None:
             l2_norm_new = torch.norm(new_y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
@@ -713,8 +1079,7 @@ class Intent_linearModule(MoeLightningModule):
             disp_dict[f"{tag}reg_loss_new_pi"] = new_pi_reg_loss.item()
         if dense_predict is not None:
             disp_dict[f"{tag}reg_loss_dense"] = dense_reg_loss.item()
-        if new_y_hat != 0:
-            disp_dict[f"{tag}vq_loss"] = vq_loss.item()
+
 
         return loss, disp_dict
 

@@ -2006,9 +2006,9 @@ class MultiModalIntentDecoder(nn.Module):
         self.output_dim = output_dim
 
         # === 共享组件 ===
-        # self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
-        # nn.init.xavier_uniform_(self.intent_bank)
-        self.intent_bank = VQIntentBank(num_intents, embed_dim)
+        self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
+        nn.init.xavier_uniform_(self.intent_bank)
+        # self.intent_bank = VQIntentBank(num_intents, embed_dim)
 
         self.mode_queries = nn.Parameter(torch.randn( self.num_modes, self.embed_dim))
         
@@ -2064,11 +2064,49 @@ class MultiModalIntentDecoder(nn.Module):
         self.predictor_dense = GMMPredictor_dense(future_steps)
         # 5. 温度（可选固定或可学习）
         self.temp = 1.0  # 或设为 nn.Parameter(torch.tensor(1.0))
-        self.intent_res_mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
+        # self.intent_res_mlp = nn.Sequential(
+        #     nn.Linear(embed_dim, embed_dim),
+        #     nn.GELU(),
+        #     nn.Linear(embed_dim, embed_dim)
+        # )
+        self.disp_residual = nn.Sequential(
+            nn.Linear(embed_dim, 64),
             nn.GELU(),
-            nn.Linear(embed_dim, embed_dim)
+            nn.Linear(64, 2)
         )
+
+
+    def visualize_intent_table(self, intent_table, num_samples=1000):
+        import torch
+        import numpy as np
+        from sklearn.manifold import TSNE
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        """
+        intent_table: 你的意图表 [num_intents, intent_dim]
+        """
+        # 1. 降维
+        tsne = TSNE(n_components=2, random_state=42, perplexity=5)
+        intent_2d = tsne.fit_transform(intent_table.detach().cpu().numpy())
+        
+        # 2. 绘制
+        plt.figure(figsize=(10, 8))
+        scatter = plt.scatter(intent_2d[:, 0], intent_2d[:, 1], 
+                            c=np.arange(len(intent_table)), 
+                            cmap='tab10', s=100, alpha=0.7)
+        
+        plt.colorbar(scatter, label='Intent ID')
+        plt.title('Intent Embedding Space (t-SNE)')
+        plt.xlabel('Dimension 1')
+        plt.ylabel('Dimension 2')
+        
+        # 3. 分析：计算类内距离
+        distances = torch.pdist(intent_table).mean().item()
+        print(f"平均意图间距离: {distances:.4f}")
+        
+        plt.savefig('intent_embedding.png', dpi=150)
+        plt.show()
+
 
     def forward(
         self,
@@ -2083,6 +2121,7 @@ class MultiModalIntentDecoder(nn.Module):
             confidences:  [B, M]       # 每条轨迹的未归一化置信度（logits）
         """
         B = context.shape[0]
+        # self.visualize_intent_table(self.intent_bank)
 
         # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
         mode = self.mode_queries.expand(B, -1, -1) # (B, K, D)
@@ -2115,25 +2154,27 @@ class MultiModalIntentDecoder(nn.Module):
 
         # Step 4: 软查询意图表 → 每个 (b,m,t) 得到意图嵌入
         # logits: [B, M, T, K]
-        # logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
-        # weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
-        # intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
-
-        z = mode_dense.reshape(-1, C)          # (B*M*T, D)
-        z_q, idx, vq_loss = self.intent_bank(z)
-        idx = idx.reshape(B, M, T)
-        intent_seq = z_q.reshape(B, M, T, C)
+        logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
+        weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
+        intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+        
+        # z = mode_dense.reshape(-1, C)          # (B*M*T, D)
+        # z_q, idx, vq_loss = self.intent_bank(z)
+        # idx = idx.reshape(B, M, T)
+        # intent_seq = z_q.reshape(B, M, T, C)
         # intent_res = self.intent_res_mlp(intent_seq)     # (B,M,T,D)
         # intent_seq = mode_dense + intent_res              # 关键残差
 
         y_hat_dense, pi_dense, scal_dense = self.predictor_dense(intent_seq)  # [B, M, T, 2]
 
+        residual = self.disp_residual(intent_seq)  # [B, M, T, 2]
+        y_hat_dense = y_hat_dense + residual  # 修正
         # 累加得到绝对坐标
         y_hat_dense = torch.cumsum(y_hat_dense, dim=2)  # [B, M, T, 2]
         scal_dense = torch.cumsum(scal_dense, dim=2)
 
         return {
-        "vq_loss": vq_loss,
+        "weights": weights,
         "mode": mode, 
         "dense_pred": dense_pred,
         "y_hat": y_hat,      # [B, M, T, 2]

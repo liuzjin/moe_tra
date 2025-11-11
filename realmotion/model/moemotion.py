@@ -53,9 +53,9 @@ class MoeMotion(nn.Module):
         )
         self.num_segments =  1  
 
-        self.segment_pos_embed = nn.Parameter(
-            torch.randn(1, 1, self.num_segments, embed_dim)
-        )
+        # self.segment_pos_embed = nn.Parameter(
+        #     torch.randn(1, 1, self.num_segments, embed_dim)
+        # )
         # self.hist_compress = HistoryCompressor(embed_dim, 30, 10)
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
         self.intent_label = intent_label
@@ -239,7 +239,7 @@ class MoeMotion(nn.Module):
         actor_feat_tmp[hist_feat_key_valid] = actor_feat
         actor_feat = actor_feat_tmp.view(B, N, segment, actor_feat.shape[-1])
 
-        actor_feat = actor_feat + self.segment_pos_embed
+        # actor_feat = actor_feat + self.segment_pos_embed
         actor_feat = actor_feat.reshape(B, -1, actor_feat.shape[-1])
 
         lane_valid_mask = data['lane_valid_mask']

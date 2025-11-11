@@ -13,15 +13,15 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_regres
 
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_Linear
-
 defaults:
   - _self_
-  - datamodule: av2_moe_stream
-  - model: MoeMotion_Linear_stream
+  - datamodule: av2_moe
+  - model: MoeMotion_Linear
+
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe_stream
+#   - model: MoeMotion_Linear_stream
 
 # defaults:
 #   - _self_
