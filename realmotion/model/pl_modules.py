@@ -1080,7 +1080,7 @@ class Intent_linearModule(MoeLightningModule):
         rel_gt = F.pad(rel_gt, (0, 0, 1, 0), "constant", 0.0)
 
         # ---- 多尺度位移损失 ----
-        ms_loss, scale_losses = self.ms_disp_loss(rel_pred, rel_gt)
+        # ms_loss, scale_losses = self.ms_disp_loss(rel_pred, rel_gt)
 
         # loss for output of state query
         if dense_predict is not None:
@@ -1128,10 +1128,10 @@ class Intent_linearModule(MoeLightningModule):
         # total loss
         loss = agent_reg_loss + agent_cls_loss + others_reg_loss + \
                 new_agent_reg_loss + dense_reg_loss + new_pi_reg_loss 
-        loss = loss + laplace_loss + laplace_loss_new + ms_loss
+        loss = loss + laplace_loss + laplace_loss_new 
 
         disp_dict = {
-            f"{tag}ms_loss": ms_loss.item(),
+            # f"{tag}ms_loss": ms_loss.item(),
             f"{tag}loss": loss.item(),
             f"{tag}reg_loss": agent_reg_loss.item(),
             f"{tag}cls_loss": agent_cls_loss.item(),
@@ -1146,8 +1146,8 @@ class Intent_linearModule(MoeLightningModule):
         if dense_predict is not None:
             disp_dict[f"{tag}reg_loss_dense"] = dense_reg_loss.item()
 
-        for i in range(len(scale_losses)):
-            disp_dict[f"{tag}scale_loss_{i}"] = scale_losses[i].item()
+        # for i in range(len(scale_losses)):
+        #     disp_dict[f"{tag}scale_loss_{i}"] = scale_losses[i].item()
 
         return loss, disp_dict
 

@@ -2072,16 +2072,7 @@ class MultiModalIntentDecoder(nn.Module):
         self.predictor_dense = GMMPredictor_dense(future_steps)
         # 5. 温度（可选固定或可学习）
         self.temp = 1.0  # 或设为 nn.Parameter(torch.tensor(1.0))
-        # self.intent_res_mlp = nn.Sequential(
-        #     nn.Linear(embed_dim, embed_dim),
-        #     nn.GELU(),
-        #     nn.Linear(embed_dim, embed_dim)
-        # )
-        self.disp_residual = nn.Sequential(
-            nn.Linear(embed_dim, 64),
-            nn.GELU(),
-            nn.Linear(64, 2)
-        )
+
 
 
     def visualize_intent_table(self, intent_table, num_samples=1000):
@@ -2205,10 +2196,10 @@ class MultiModalIntentDecoder(nn.Module):
 
         # Step 4: 软查询意图表 → 每个 (b,m,t) 得到意图嵌入
         # logits: [B, M, T, K]
-        logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
-        weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
-        intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
-        
+        # logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
+        # weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
+        # intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+        intent_seq = self.pyramid_intent_seq(mode_dense)
         # z = mode_dense.reshape(-1, C)          # (B*M*T, D)
         # z_q, idx, vq_loss = self.intent_bank(z)
         # idx = idx.reshape(B, M, T)
@@ -2218,14 +2209,11 @@ class MultiModalIntentDecoder(nn.Module):
 
         y_hat_dense, pi_dense, scal_dense = self.predictor_dense(intent_seq)  # [B, M, T, 2]
 
-        residual = self.disp_residual(intent_seq)  # [B, M, T, 2]
-        y_hat_dense = y_hat_dense + residual  # 修正
-        # 累加得到绝对坐标
         y_hat_dense = torch.cumsum(y_hat_dense, dim=2)  # [B, M, T, 2]
         scal_dense = torch.cumsum(scal_dense, dim=2)
 
         return {
-        "weights": weights,
+        # "weights": weights,
         "mode": mode, 
         "dense_pred": dense_pred,
         "y_hat": y_hat,      # [B, M, T, 2]
