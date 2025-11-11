@@ -2006,9 +2006,17 @@ class MultiModalIntentDecoder(nn.Module):
         self.output_dim = output_dim
 
         # === 共享组件 ===
-        self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
-        nn.init.xavier_uniform_(self.intent_bank)
+        # self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
+        # nn.init.xavier_uniform_(self.intent_bank)
         # self.intent_bank = VQIntentBank(num_intents, embed_dim)
+        self.intent_bank_s = nn.Parameter(torch.randn(num_intents, embed_dim))   # 短程
+        self.intent_bank_m = nn.Parameter(torch.randn(6, embed_dim))   # 中程
+        self.intent_bank_l = nn.Parameter(torch.randn(4, embed_dim))   # 长程
+        nn.init.xavier_uniform_(self.intent_bank_s)
+        nn.init.xavier_uniform_(self.intent_bank_m)
+        nn.init.xavier_uniform_(self.intent_bank_l)
+        # 融合权重（可学习）
+        self.fusion_w = nn.Parameter(torch.ones(3))
 
         self.mode_queries = nn.Parameter(torch.randn( self.num_modes, self.embed_dim))
         
@@ -2107,7 +2115,50 @@ class MultiModalIntentDecoder(nn.Module):
         plt.savefig('intent_embedding.png', dpi=150)
         plt.show()
 
+    def pyramid_intent_seq(self, mode_dense):
+        """
+        返回：多尺度意图嵌入融合后的 [B, M, T, D]
+        步骤：
+        1. 每级降采样 → 查询对应意图表 → 得到该尺度的意图嵌入
+        2. 插值回 T 长度
+        3. 加权融合（可学习权重）
+        """
+        B, M, T, D = mode_dense.shape
+        K = 8  # 每级意图数
 
+        # 1. 三级降采样 + 意图嵌入（einsum 向量化）
+        feat_s = mode_dense                                          # [B, M, T, D]
+        feat_m = F.avg_pool1d(mode_dense.view(B*M, T, D).transpose(1,2), kernel_size=4, stride=4).transpose(1,2)  # [B*M, T//4, D]
+        feat_l = F.avg_pool1d(mode_dense.view(B*M, T, D).transpose(1,2), kernel_size=16, stride=16).transpose(1,2)  # [B*M, T//16, D]
+        feat_m = feat_m.view(B, M, -1, D)
+        feat_l = feat_l.view(B, M, -1, D)
+        # 意图嵌入：每级查询自己的意图表 → [B*M, T', K] 权重 → 加权求和得嵌入
+        def embed_intent(feat, bank):
+            # feat: [B*M, T', D]   bank: [K, D]
+            logits = torch.einsum('bmtd,kd->bmtk', feat, bank)  # [B*M, T', K]
+            weights = F.softmax(logits, dim=-1)               # [B*M, T', K]
+            embed = torch.einsum('bmtk,kd->bmtd', weights, bank)  # [B*M, T', D]
+            return embed
+
+        embed_s = embed_intent(feat_s, self.intent_bank_s)   # [B*M, T, D]
+        embed_m = embed_intent(feat_m, self.intent_bank_m)   # [B*M, T//4, D]
+        embed_l = embed_intent(feat_l, self.intent_bank_l)   # [B*M, T//16, D]
+
+        # 2. 插值回 T 长度（嵌入特征）
+        def upsample_embed(embed, T_target):
+            B, M, T_prime, D = embed.shape
+            embed_3d = embed.permute(0, 1, 3, 2).reshape(B * M, D, T_prime)  # [B*M, D, T']
+            embed_3d = F.interpolate(embed_3d, size=T_target, mode='linear', align_corners=False)
+            return embed_3d.view(B, M, D, T_target).permute(0, 1, 3, 2)  # [B, M, T, D]
+
+        embed_m = upsample_embed(embed_m, T)
+        embed_l = upsample_embed(embed_l, T)
+
+        # 3. 加权融合（可学习权重）
+        fusion_w = F.softmax(self.fusion_w, dim=0)  # [3]
+        intent_fused = fusion_w[0] * embed_s + fusion_w[1] * embed_m + fusion_w[2] * embed_l  # [B, M, T, D]
+
+        return intent_fused 
     def forward(
         self,
         context: torch.Tensor,      # [B, N, D]
