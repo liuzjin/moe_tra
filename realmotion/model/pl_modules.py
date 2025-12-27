@@ -1262,7 +1262,6 @@ class StreamLightningModule(Intent_linearModule):
         self.submission_handler.format_data(data[-1], all_outs[-1]['y_hat'], all_outs[-1]['pi'])
 
 
-
 class Cross_moe_mlp_Module(BaseLightningModule):
     def __init__(self,
                  num_grad_frame=3,
@@ -1302,6 +1301,91 @@ class Cross_moe_mlp_Module(BaseLightningModule):
         out = self(data, False)
         out['pi'] = out['y_hat']['pi']
         out['y_hat'] = out['y_hat']['predictions']
+        _, loss_dict = self.cal_loss(out, data)
+        metrics = self.metrics(out, data['target'][:, 0])
+
+        self.log(
+            'val/reg_loss',
+            loss_dict['reg_loss'],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+        )
+        self.log_dict(
+            metrics,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=1,
+            sync_dist=True,
+        )
+
+class BezierModule(MoeLightningModule):
+    def cal_loss(self, out, data, tag=''):
+        y_hat, pi, y_hat_others = out['y_hat'], out['pi'], out['y_hat_others']
+        new_y_hat = out.get('new_y_hat', None)
+        y, y_others = data['target'][:, 0], data['target'][:, 1:]
+        if new_y_hat is None:
+            l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+            # y_hat:[32, 6, 60, 2]   y:[32, 60, 2]
+        else:
+            l2_norm = torch.norm(new_y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+        best_mode = torch.argmin(l2_norm, dim=-1)
+        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+
+        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
+        agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
+        if new_y_hat is not None:
+            new_y_hat_best = new_y_hat[torch.arange(new_y_hat.shape[0]), best_mode]
+            new_agent_reg_loss = F.smooth_l1_loss(new_y_hat_best[..., :2], y)
+        else:
+            new_agent_reg_loss = 0
+
+        others_reg_mask = data['target_mask'][:, 1:]
+        others_reg_loss = F.smooth_l1_loss(
+            y_hat_others[others_reg_mask], y_others[others_reg_mask]
+        )
+
+        loss = agent_reg_loss + agent_cls_loss + others_reg_loss + new_agent_reg_loss
+        disp_dict = {
+            f'{tag}loss': loss.item(),
+            f'{tag}reg_loss': agent_reg_loss.item(),
+            f'{tag}cls_loss': agent_cls_loss.item(),
+            f'{tag}others_reg_loss': others_reg_loss.item(),
+        }
+        if new_y_hat is not None:
+            disp_dict[f'{tag}reg_loss_refine'] = new_agent_reg_loss.item()
+
+        return loss, disp_dict
+
+    def training_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
+        out = self(data, True)
+        
+        out['pi'] = out['y_hat']['logits']
+        out['y_hat'] = out['y_hat']['y_hat']
+        loss, loss_dict = self.cal_loss(out, data)
+
+        for k, v in loss_dict.items():
+            self.log(
+                f'train/{k}',
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
+
+        return loss
+
+    def validation_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
+        out = self(data, False)
+        out['pi'] = out['y_hat']['logits']
+        out['y_hat'] = out['y_hat']['y_hat']
         _, loss_dict = self.cal_loss(out, data)
         metrics = self.metrics(out, data['target'][:, 0])
 

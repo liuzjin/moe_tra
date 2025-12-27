@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,7 +58,108 @@ class MultimodalDecoder(nn.Module):
                 "logits": pi, 
                 "pi": probs,
                  "mode": x }
+
+class Bezier_decoder(MultimodalDecoder):
+    def __init__(self,bezier_points=5, **kwargs):
+        super().__init__(**kwargs)
+        self.bezier_points = bezier_points
+        self.loc = nn.Sequential(
+            nn.Linear(kwargs['embed_dim'], 256),
+            nn.ReLU(),
+            nn.Linear(256, kwargs['embed_dim']),
+            nn.ReLU(),
+            nn.Linear(kwargs['embed_dim'], self.bezier_points * 2),
+        )
+        # self.loc = GMMPredictor(self.bezier_points)
+
+
+
+    def bezier_curve_from_control_points_torch(self, control_points, num_points=50):
+        """
+        从贝塞尔控制点批量生成轨迹点（支持任意阶贝塞尔曲线）。
+        
+        Args:
+            control_points (Tensor): Shape [B, K, N_ctrl, D]
+                - B: batch size
+                - K: number of modes (e.g., MDN components)
+                - N_ctrl: number of control points (n+1 for degree-n Bezier)
+                - D: spatial dimension (e.g., 2 for (x, y))
+            num_points (int): number of trajectory points to sample (default: 50)
+        
+        Returns:
+            trajectory (Tensor): Shape [B, K, num_points, D]
+        """
+        B, K, N_ctrl, D = control_points.shape
+        device = control_points.device
+        dtype = control_points.dtype
+        
+        n = N_ctrl - 1  # Bezier degree
+        
+        # Precompute binomial coefficients: C(n, i) for i = 0..n
+        # Use log to avoid overflow for large n (though n is usually small, e.g., 3~5)
+        log_binom = torch.lgamma(torch.tensor(n + 1, dtype=dtype, device=device)) \
+                    - torch.lgamma(torch.arange(n + 1, dtype=dtype, device=device) + 1) \
+                    - torch.lgamma(torch.tensor(n + 1, dtype=dtype, device=device) - torch.arange(n + 1, dtype=dtype, device=device))
+        binom_coeffs = torch.exp(log_binom)  # shape: [n+1]
+
+        # Sample t in [0, 1]
+        t = torch.linspace(0.0, 1.0, num_points, device=device, dtype=dtype)  # [num_points]
+        
+        # Expand t for broadcasting: [num_points, n+1]
+        i = torch.arange(n + 1, dtype=dtype, device=device)  # [n+1]
+        t = t.unsqueeze(1)  # [num_points, 1]
+        
+        # Compute Bernstein basis: B_i^n(t) = C(n,i) * (1-t)^(n-i) * t^i
+        # Use log-space for numerical stability (optional but safe)
+        log_bernstein = (
+            torch.log(binom_coeffs).unsqueeze(0) +               # [1, n+1]
+            (n - i) * torch.log(1 - t + 1e-8) +                  # [num_points, n+1]
+            i * torch.log(t + 1e-8)                              # [num_points, n+1]
+        )
+        bernstein = torch.exp(log_bernstein)  # [num_points, n+1]
+        
+        # Normalize to mitigate log-sum-exp errors (optional but recommended)
+        bernstein = bernstein / bernstein.sum(dim=1, keepdim=True)
+        
+        # Now compute: trajectory = bernstein @ control_points
+        # bernstein: [num_points, n+1]
+        # control_points: [B, K, n+1, D]
+        # We want: [B, K, num_points, D]
+        
+        # Reshape control_points to [B*K, n+1, D]
+        ctrl_flat = control_points.view(B * K, N_ctrl, D)
+        
+        # Matrix multiply: [num_points, n+1] @ [B*K, n+1, D] -> [B*K, num_points, D]
+        traj_flat = torch.bmm(bernstein.unsqueeze(0).expand(B * K, -1, -1), ctrl_flat)
+        
+        # Reshape back to [B, K, num_points, D]
+        trajectory = traj_flat.view(B, K, num_points, D)
+        
+        return trajectory
     
+    def forward(self, x):
+        B, T, D = x.shape
+        x_flat = x.view(B, -1) 
+        aggregated_x = self.aggregation_layer(x_flat) # 输出形状: (B, D), 例如 (48, 128)
+        x = self.multimodal_proj(aggregated_x).view(-1, 6, self.embed_dim)
+        remaining_control_points  = self.loc(x).view(-1, 6, self.bezier_points, 2)
+        origin_points = torch.zeros(B, 6, 1, 2, device=remaining_control_points.device, 
+                            dtype=remaining_control_points.dtype)
+        loc = torch.cat([origin_points, remaining_control_points], dim=2)  # [B, 6, bezier_points, 2]
+        
+        pred_p = self.bezier_curve_from_control_points_torch(loc, self.future_steps)
+        if self.return_prob:
+            pi = self.pi(x).squeeze(-1)
+            probs = F.softmax(pi, dim=-1)
+        else:
+            pi = None
+
+        
+        return {"y_hat": pred_p, # (B, top_k, T, 2) -> Top-K的轨迹
+                "logits": pi, 
+                "probs": probs,
+                 "mode": x }
+
 class MLPExpert(nn.Module):
     def __init__(self, d_model, prediction_horizon, drop=0.0, num_heads=8,
                  mlp_ratio=4.0,moe_drop=0.0, qkv_bias=False, attn_drop=0.0, drop_path=0.0,

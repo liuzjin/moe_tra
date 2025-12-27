@@ -13,10 +13,15 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_regres
 
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: MoeMotion_Linear
+
 defaults:
   - _self_
   - datamodule: av2_moe
-  - model: MoeMotion_Linear
+  - model: Bezier_Linear
 
 # defaults:
 #   - _self_
@@ -54,8 +59,8 @@ seed: 2333
 tag: ${model.tag}-${datamodule.tag}
 output_dir: outputs/${tag}/${now:%Y%m%d-%H%M%S}
 
-gpus: 1
-batch_size: 32
+gpus: 4
+batch_size: 96
 epochs: 60
 checkpoint: 
 submit:
