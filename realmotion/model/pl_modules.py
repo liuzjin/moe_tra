@@ -29,6 +29,7 @@ class BaseLightningModule(pl.LightningModule):
         self.pre_ensemble = True
         self.time_list = []
         self.optim = optim
+        self.lr = optim.get('lr', 1e-4)
         # self.save_hyperparameters()
 
         self.model = model
