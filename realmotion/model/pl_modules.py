@@ -18,7 +18,6 @@ from realmotion.utils.optim import WarmupCosLR
 from realmotion.utils.submission_av2 import SubmissionAv2
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 class BaseLightningModule(pl.LightningModule):
     def __init__(
@@ -1367,6 +1366,7 @@ class BezierModule(MoeLightningModule):
         out['pi'] = out['y_hat']['logits']
         out['y_hat'] = out['y_hat']['y_hat']
         loss, loss_dict = self.cal_loss(out, data)
+        self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
 
         for k, v in loss_dict.items():
             self.log(
