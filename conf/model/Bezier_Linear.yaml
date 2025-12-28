@@ -21,7 +21,7 @@ pl_module:
     mlp_drop: 0.0
     moe: False
     his_embed_moe: [True, True, True, True]
-    moe_type: "bezier"
+    moe_type: "multibezier"
     query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1
@@ -33,8 +33,9 @@ pl_module:
     his_num_heads: [2, 4, 8, 16]
     out_indices: [0, 1, 2, 3]
     bezier_points: 3
+    num_bezier_segments: 3
   optim:
-    lr: 4.0e-3
+    lr: 2.0e-3
     weight_decay: 1e-2
     min_lr: 1e-5
     epochs: ${epochs}

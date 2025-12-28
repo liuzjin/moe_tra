@@ -1367,17 +1367,6 @@ class BezierModule(MoeLightningModule):
         out['y_hat'] = out['y_hat']['y_hat']
         loss, loss_dict = self.cal_loss(out, data)
         self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
-
-        for k, v in loss_dict.items():
-            self.log(
-                f'train/{k}',
-                v,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-            )
-
         return loss
 
     def validation_step(self, data, batch_idx):
@@ -1388,15 +1377,8 @@ class BezierModule(MoeLightningModule):
         out['y_hat'] = out['y_hat']['y_hat']
         _, loss_dict = self.cal_loss(out, data)
         metrics = self.metrics(out, data['target'][:, 0])
-
-        self.log(
-            'val/reg_loss',
-            loss_dict['reg_loss'],
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            sync_dist=True,
-        )
+        self.log_dict({f"val/{k}": v for k, v in loss_dict.items()}, 
+                    on_step=False, on_epoch=True, sync_dist=True)
         self.log_dict(
             metrics,
             prog_bar=True,

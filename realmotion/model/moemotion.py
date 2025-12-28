@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  Bezier_decoder, HierarchicalDecoder, MoE_QueryDecoder, MultiModalIntentDecoder, MultiModalIntentDecoder2, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
+from .layers.multimodal_decoder import  Bezier_decoder, HierarchicalDecoder, MoE_QueryDecoder, Multi_Bezier_decoder, MultiModalIntentDecoder, MultiModalIntentDecoder2, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
 from .layers.transformer_blocks import Block, InterBlock, InteractionModule
 
 
@@ -40,6 +40,7 @@ class MoeMotion(nn.Module):
         his_num_heads=[2, 4, 8, 16],
         out_indices=[0, 1, 2, 3],
         bezier_points=3,
+        num_bezier_segments=3,
     ) -> None:
         super().__init__()
 
@@ -183,6 +184,8 @@ class MoeMotion(nn.Module):
         else:
             if moe_type == "bezier":
                 self.decoder = Bezier_decoder(bezier_points=bezier_points,embed_dim=embed_dim, future_steps=future_len,num_segments=self.num_segments)
+            elif moe_type == "multibezier":
+                self.decoder = Multi_Bezier_decoder(bezier_points=bezier_points,num_bezier_segments=num_bezier_segments,embed_dim=embed_dim, future_steps=future_len,num_input_tokens=self.num_segments)
             else:
                 self.decoder = MultimodalDecoder(embed_dim, future_steps,self.num_segments)
         self.dense_predictor = nn.Sequential(

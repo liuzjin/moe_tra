@@ -160,6 +160,146 @@ class Bezier_decoder(MultimodalDecoder):
                 "probs": probs,
                  "mode": x }
 
+
+class Multi_Bezier_decoder(MultimodalDecoder):
+    """
+    分段贝塞尔曲线解码器
+    预测多段连接的贝塞尔曲线，并采样成轨迹点。
+    """
+    def __init__(self, embed_dim, future_steps, num_input_tokens=5, return_prob=True, 
+                 num_bezier_segments=3, bezier_points=3):
+        """
+        Args:
+            num_bezier_segments: 轨迹被切分成几段贝塞尔曲线 (建议 3)
+            bezier_degree: 每一段曲线的阶数 (建议 3, 即 Cubic Bezier)
+        """
+        super().__init__(embed_dim, future_steps, num_input_tokens, return_prob)
+        
+        self.num_bezier_segments = num_bezier_segments
+        self.bezier_degree = bezier_points
+        
+        # 每一段我们需要预测 degree 个点 (因为起点固定为上一段终点)
+        # 例如 3阶曲线需要4个点(P0, P1, P2, P3)。
+        # P0 是已知的，网络需要预测 P1, P2, P3。
+        points_per_segment = self.bezier_degree
+        total_ctrl_points = self.num_bezier_segments * points_per_segment
+
+        # 覆盖父类的 self.loc
+        self.loc = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embed_dim),
+            nn.ReLU(),
+            # 输出维度: [6, segments * degree * 2]
+            nn.Linear(embed_dim, total_ctrl_points * 2),
+        )
+
+    def get_bernstein_matrix(self, n, num_points, device):
+        """
+        生成伯恩斯坦基矩阵 (缓存友好型)
+        Returns: [num_points, n+1]
+        """
+        # 计算二项式系数
+        c_n = torch.tensor([1.0], device=device)
+        for i in range(1, n + 1):
+            c_n = torch.cat([c_n, torch.tensor([c_n[-1] * (n - i + 1) / i], device=device)])
+        
+        t = torch.linspace(0.0, 1.0, num_points, device=device).unsqueeze(1) # [T, 1]
+        i = torch.arange(n + 1, device=device).float().unsqueeze(0) # [1, n+1]
+        
+        # Bernstein basis: C(n,i) * t^i * (1-t)^(n-i)
+        basis = c_n * torch.pow(t, i) * torch.pow(1 - t, n - i)
+        return basis
+
+    def forward(self, x):
+        B, T, D = x.shape
+        x_flat = x.view(B, -1) 
+        
+        # 1. 聚合与多模态投影
+        aggregated_x = self.aggregation_layer(x_flat) 
+        x_modes = self.multimodal_proj(aggregated_x).view(-1, 6, self.embed_dim) # [B, 6, D]
+        
+        # 2. 预测控制点偏移量 (Relative Offsets)
+        # Shape: [B, 6, Segments, Degree, 2]
+        pred_offsets = self.loc(x_modes).view(B, 6, self.num_bezier_segments, self.bezier_degree, 2)
+        
+        # 3. 构建绝对控制点 (核心逻辑：C0 连续拼接)
+        # 每一段的位移向量 (Displacement Vector) 是该段最后一个预测点
+        # pred_offsets[:, :, :, -1, :] 代表每一段的终点相对于该段起点的偏移
+        segment_displacements = pred_offsets[..., -1, :] # [B, 6, Seg, 2]
+        
+        # 计算每一段的绝对起点 (Accumulated Origins)
+        # 第0段起点是(0,0)，第1段起点是第0段的终点...
+        accumulated_displacements = torch.cumsum(segment_displacements, dim=2)
+        # 在时间维度前面补一个 (0,0)
+        zeros = torch.zeros(B, 6, 1, 2, device=x.device, dtype=x.dtype)
+        segment_origins = torch.cat([zeros, accumulated_displacements[..., :-1, :]], dim=2) # [B, 6, Seg, 2]
+        
+        # 将起点广播并加到预测的偏移量上
+        # segment_origins: [B, 6, Seg, 1, 2]
+        # pred_offsets:    [B, 6, Seg, Degree, 2]
+        # full_segment_ctrls (P1...P3): [B, 6, Seg, Degree, 2]
+        full_segment_ctrls = segment_origins.unsqueeze(3) + pred_offsets
+        
+        # 把起点 P0 拼接到每一段的控制点列表中
+        # specific_P0 (P0): [B, 6, Seg, 1, 2]
+        specific_P0 = segment_origins.unsqueeze(3)
+        # final_ctrl_points: [B, 6, Seg, Degree+1, 2] -> 每一段完整的4个点
+        final_ctrl_points = torch.cat([specific_P0, full_segment_ctrls], dim=3)
+        
+        # 4. 贝塞尔采样
+        # 确定每一段需要采样多少个点
+        # 为了保证总点数 = future_steps，我们可能需要处理除不尽的情况
+        # 策略：每段采样 ceil(T/S) 个点，拼接后截取前 T 个点
+        points_per_seg = (self.future_steps + self.num_bezier_segments - 1) // self.num_bezier_segments + 1
+        # +1 是为了保证拼接时去掉重复点后仍然够长
+        
+        # 准备矩阵乘法
+        # Reshape to [Batch_Total, Degree+1, 2]
+        flat_ctrls = final_ctrl_points.view(-1, self.bezier_degree + 1, 2)
+        
+        # 获取基矩阵 [points, degree+1]
+        basis_matrix = self.get_bernstein_matrix(self.bezier_degree, points_per_seg, x.device)
+        
+        # 矩阵乘法生成轨迹: [Batch_Total, points, 2]
+        flat_traj_segments = torch.matmul(basis_matrix.unsqueeze(0), flat_ctrls)
+        
+        # 5. 拼接轨迹并去重
+        # Reshape back: [B, 6, Seg, points, 2]
+        traj_segments = flat_traj_segments.view(B, 6, self.num_bezier_segments, points_per_seg, 2)
+        
+        # 拼接：除了最后一段，前面的段都去掉最后一个点 (因为 Seg[i]的终点 == Seg[i+1]的起点)
+        trajs_list = []
+        for i in range(self.num_bezier_segments):
+            seg = traj_segments[:, :, i, :, :]
+            if i < self.num_bezier_segments - 1:
+                trajs_list.append(seg[:, :, :-1, :])
+            else:
+                trajs_list.append(seg)
+                
+        full_traj = torch.cat(trajs_list, dim=2) # [B, 6, Total_T, 2]
+        
+        # 截取最终长度
+        pred_loc = full_traj[:, :, :self.future_steps, :]
+
+        # 6. 计算概率 (逻辑与父类一致)
+        if self.return_prob:
+            pi_logits = self.pi(x_modes).squeeze(-1) # [B, 6]
+            probs = F.softmax(pi_logits, dim=-1)
+        else:
+            pi_logits = None
+            probs = None
+
+        return {
+            "y_hat": pred_loc, # (B, 6, T, 2)
+            "logits": pi_logits, 
+            "pi": probs,
+            "mode": x_modes,
+            # debug用: 返回控制点可以方便可视化
+            "control_points": final_ctrl_points 
+        }
+
+
 class MLPExpert(nn.Module):
     def __init__(self, d_model, prediction_horizon, drop=0.0, num_heads=8,
                  mlp_ratio=4.0,moe_drop=0.0, qkv_bias=False, attn_drop=0.0, drop_path=0.0,
@@ -2360,12 +2500,12 @@ class MultiModalIntentDecoder2(nn.Module):
             nn.Linear(1, 64), nn.GELU(), nn.Linear(64, embed_dim)
         )
         self.query_mode =nn.Sequential(
-            nn.Linear(7, 256), 
+            nn.Linear(1, 256), 
             nn.GELU(), 
             nn.Linear(256, self.num_modes)
         )
         self.query_intent =nn.Sequential(
-            nn.Linear(7, 256), 
+            nn.Linear(1, 256), 
             nn.GELU(), 
             nn.Linear(256, self.future_steps)
         )
@@ -2391,7 +2531,7 @@ class MultiModalIntentDecoder2(nn.Module):
         B = context.shape[0]
 
         # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
-        mode = self.query_mode(context[:,:7,...].reshape(B, -1, 7))
+        mode = self.query_mode(context[:,:segment,...].reshape(B, -1, segment))
         mode = mode.reshape(B, self.num_modes, -1)
 
         y_hat, pi, scal = self.predictor(mode)
@@ -2399,7 +2539,7 @@ class MultiModalIntentDecoder2(nn.Module):
         scal = torch.cumsum(scal, dim=-2)
 
 
-        intent = self.query_intent(context[:,:7,...].reshape(B, -1, 7))
+        intent = self.query_intent(context[:,:segment,...].reshape(B, -1, segment))
         intent = intent.reshape(B, self.future_steps, -1)
 
 
