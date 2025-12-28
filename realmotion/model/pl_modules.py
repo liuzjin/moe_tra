@@ -1325,6 +1325,7 @@ class BezierModule(MoeLightningModule):
         y_hat, pi, y_hat_others = out['y_hat'], out['pi'], out['y_hat_others']
         new_y_hat = out.get('new_y_hat', None)
         y, y_others = data['target'][:, 0], data['target'][:, 1:]
+        pred_ctrl = out.get('control_points', None)
         if new_y_hat is None:
             l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
             # y_hat:[32, 6, 60, 2]   y:[32, 60, 2]
@@ -1345,16 +1346,37 @@ class BezierModule(MoeLightningModule):
         others_reg_loss = F.smooth_l1_loss(
             y_hat_others[others_reg_mask], y_others[others_reg_mask]
         )
+        loss_smooth = 0.0
+        if pred_ctrl is not None:
+            v_in = pred_ctrl[:, :, :-1, -1, :] - pred_ctrl[:, :, :-1, -2, :] 
+            # 后一段的前两点向量
+            v_out = pred_ctrl[:, :, 1:, 1, :] - pred_ctrl[:, :, 1:, 0, :] 
+            
+            v_in_norm = F.normalize(v_in, dim=-1, eps=1e-6)
+            v_out_norm = F.normalize(v_out, dim=-1, eps=1e-6)
+            
+            # Cosine Embedding Loss target=1 (完全共线)
+            # dim=-1 求点积
+            cos_sim = (v_in_norm * v_out_norm).sum(dim=-1) 
+            loss_smooth = (1.0 - cos_sim).mean()
 
-        loss = agent_reg_loss + agent_cls_loss + others_reg_loss + new_agent_reg_loss
+
+        loss = agent_reg_loss 
+        + agent_cls_loss 
+        + others_reg_loss 
+        + new_agent_reg_loss 
+        + 1 * loss_smooth
         disp_dict = {
             f'{tag}loss': loss.item(),
             f'{tag}reg_loss': agent_reg_loss.item(),
             f'{tag}cls_loss': agent_cls_loss.item(),
             f'{tag}others_reg_loss': others_reg_loss.item(),
+            f'{tag}smooth_loss': loss_smooth.item(),
         }
         if new_y_hat is not None:
             disp_dict[f'{tag}reg_loss_refine'] = new_agent_reg_loss.item()
+        if pred_ctrl is not None:
+            disp_dict[f'{tag}smooth_loss'] = loss_smooth.item()
 
         return loss, disp_dict
 
@@ -1364,6 +1386,7 @@ class BezierModule(MoeLightningModule):
         out = self(data, True)
         
         out['pi'] = out['y_hat']['logits']
+        out['control_points'] = out['y_hat']['control_points']
         out['y_hat'] = out['y_hat']['y_hat']
         loss, loss_dict = self.cal_loss(out, data)
         self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
@@ -1374,7 +1397,9 @@ class BezierModule(MoeLightningModule):
             data = data[-1]
         out = self(data, False)
         out['pi'] = out['y_hat']['logits']
+        out['control_points'] = out['y_hat']['control_points']
         out['y_hat'] = out['y_hat']['y_hat']
+        
         _, loss_dict = self.cal_loss(out, data)
         metrics = self.metrics(out, data['target'][:, 0])
         self.log_dict({f"val/{k}": v for k, v in loss_dict.items()}, 
