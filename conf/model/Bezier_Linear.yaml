@@ -35,7 +35,7 @@ pl_module:
     bezier_points: 3
     num_bezier_segments: 3
   optim:
-    lr: 1e-4
+    lr: 1.36e-6
     weight_decay: 1e-2
     min_lr: 1e-6
     epochs: ${epochs}
