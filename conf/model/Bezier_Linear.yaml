@@ -20,7 +20,7 @@ pl_module:
     drop_path: 0.2
     mlp_drop: 0.0
     moe: False
-    his_embed_moe: [True, True, True, True]
+    his_embed_moe: [False, False, False, False]
     moe_type: "time_bezier"
     query_cross_layers: 2
     query_self_atten: True
