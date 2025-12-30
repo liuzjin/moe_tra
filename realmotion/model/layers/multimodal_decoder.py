@@ -618,7 +618,7 @@ class Cross_BSpline_Decoder(nn.Module):
     def __init__(
         self,
         embed_dim=256,
-        future_steps=60,      # T
+        future_steps=60,     # T
         num_modes = 6,     
         num_heads = 8,
         mlp_ratio = 4.0,
@@ -630,12 +630,14 @@ class Cross_BSpline_Decoder(nn.Module):
         norm_layer=nn.LayerNorm,
         query_cross_layers=2,
         num_control_points=12, 
-        degree=3
+        degree=3,
+        return_prob=True
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.future_steps = future_steps
         self.num_modes = num_modes
+        self.num_ctrl = num_control_points
 
         # 融合权重（可学习）
         self.fusion_w = nn.Parameter(torch.ones(3))
@@ -652,8 +654,93 @@ class Cross_BSpline_Decoder(nn.Module):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                 ) for i in range(query_cross_layers))
-        self.predictor = BSpline_GMM_Predictor(future_len=future_steps, dim=embed_dim, num_control_points=num_control_points, degree=degree)
- 
+        self.loc = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, (self.num_ctrl - 1) * 2),
+        )
+        
+        # --- 预计算 B样条基矩阵 M ---
+        # 结果 shape: [future_steps, num_ctrl]
+        # 注册为 buffer，这样 device 会自动管理，且不作为参数更新
+        self.register_buffer("basis_matrix", self._precompute_basis(future_steps, num_control_points, degree))
+        self.return_prob = return_prob
+        if return_prob:
+            self.pi = nn.Sequential(
+                nn.Linear(embed_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, embed_dim),
+                nn.ReLU(),
+                nn.Linear(embed_dim, 1),
+            )
+
+    def _precompute_basis(self, T, n, p):
+        """
+        使用 Cox-de Boor 递归公式计算均匀 B-Spline 基矩阵
+        T: 时间步数
+        n: 控制点数量
+        p: 阶数 (degree)
+        """
+        # 1. 定义节点向量 (Knot Vector)
+        # Clamped Knot Vector: 开头结尾重复 p+1 次，中间均匀分布
+        # 节点总数 m = n + p + 1
+        m = n + p + 1
+        
+        # 内部节点数
+        num_inner = m - 2 * (p + 1)
+        
+        # 构造节点向量 u_vec: [0,0,0,0, 0.2, 0.4..., 1,1,1,1]
+        inner_knots = torch.linspace(0, 1, num_inner + 2)[1:-1]
+        knots = torch.cat([
+            torch.zeros(p + 1),
+            inner_knots,
+            torch.ones(p + 1)
+        ])
+        
+        # 2. 评估时间点 t (归一化到 [0,1])
+        t = torch.linspace(0, 1, T)
+        
+        # 3. Cox-de Boor 递归计算基函数值 N_{i,p}(t)
+        # 为了矩阵计算，我们计算所有 i 和所有 t
+        
+        # 初始化 0阶基函数
+        # Basis shape: [m-1, T] -> 代表 N_{i,0}(t)
+        basis = torch.zeros(m - 1, T)
+        for i in range(m - 1):
+            # N_{i,0}(t) = 1 if knots[i] <= t < knots[i+1]
+            mask = (t >= knots[i]) & (t < knots[i+1])
+            # 处理 t=1 的边界情况 (属于最后一个区间)
+            if knots[i+1] == 1.0: 
+                mask = mask | (t == 1.0)
+            basis[i, mask] = 1.0
+            
+        # 递归 p 次
+        for d in range(1, p + 1):
+            new_basis = torch.zeros(m - 1 - d, T)
+            for i in range(m - 1 - d):
+                # Term 1
+                numer1 = (t - knots[i])
+                denom1 = (knots[i+d] - knots[i])
+                term1 = 0.0
+                if denom1 != 0:
+                    term1 = (numer1 / denom1) * basis[i]
+                
+                # Term 2
+                numer2 = (knots[i+d+1] - t)
+                denom2 = (knots[i+d+1] - knots[i+1])
+                term2 = 0.0
+                if denom2 != 0:
+                    term2 = (numer2 / denom2) * basis[i+1]
+                    
+                new_basis[i] = term1 + term2
+            basis = new_basis
+            
+        # 最终 basis shape 是 [n, T]
+        # 转置为 [T, n] 以便做 M * C
+        return basis.t()
+    
     def forward(
         self,
         context: torch.Tensor,      # [B, N, D]
@@ -674,15 +761,30 @@ class Cross_BSpline_Decoder(nn.Module):
         
         for blk in self.query_mode:
             mode = blk(src=mode, src_kv=context, key_padding_mask=key_padding_mask)
-        y_hat, pi, scal = self.predictor(mode)
+
+        pred_offsets = self.loc(mode).view(B, 6, self.num_ctrl - 1, 2)
+        zeros = torch.zeros(B, 6, 1, 2, device=mode.device)
+        ctrl_points = torch.cat([zeros, pred_offsets], dim=2) # [B, 6, num_ctrl, 2]
+        
+        basis = self.basis_matrix.unsqueeze(0).unsqueeze(0) 
+        
+        pred_loc = torch.matmul(basis, ctrl_points) 
+        
+        if self.return_prob:
+            pi_logits = self.pi(mode).squeeze(-1)
+            probs = F.softmax(pi_logits, dim=-1)
+        else:
+            pi_logits, probs = None, None
 
         return {
-        # "weights": weights,
-        "mode": mode, 
-        "y_hat": y_hat,      # [B, M, T, 2]
-        "pi": pi,              # [B, M]
-        "scal": scal,             # [B, M, T, 2]
-    }
+            "y_hat": pred_loc,
+            "logits": pi_logits, 
+            "pi": probs,
+            "mode": mode,
+            # "control_points": ctrl_points
+        }
+
+
 
 class MLPExpert(nn.Module):
     def __init__(self, d_model, prediction_horizon, drop=0.0, num_heads=8,

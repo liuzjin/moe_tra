@@ -1,7 +1,7 @@
 tag: Cross_Bspline
 
 pl_module:
-  _target_: realmotion.model.pl_modules.Cross_Spline_Module
+  _target_: realmotion.model.pl_modules.BezierModule
   intent_label: ${intent_label}
   num_experts: ${num_experts}
   top_k: ${top_k}
