@@ -299,6 +299,144 @@ class Multi_Bezier_decoder(MultimodalDecoder):
             "control_points": final_ctrl_points 
         }
 
+class BSpline_Decoder(MultimodalDecoder):
+    """
+    方案二：B样条曲线 (隐式分段，数学平滑)
+    """
+    def __init__(self, embed_dim, future_steps, num_input_tokens=5, return_prob=True, 
+                 num_control_points=12, degree=3):
+        """
+        Args:
+            num_control_points: 控制点总数 (越多越灵活，但太少会拟合不足)
+                                建议: degree + segments, 比如 3阶 + 3段 ~ 6-8个点
+                                为了覆盖复杂意图，AV2建议设为 10-15
+            degree: B样条阶数 (建议3)
+        """
+        super().__init__(embed_dim, future_steps, num_input_tokens, return_prob)
+        
+        self.num_ctrl = num_control_points
+        self.degree = degree
+        
+        # 预测除原点外的控制点 (num_ctrl - 1)
+        self.loc = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, (self.num_ctrl - 1) * 2),
+        )
+        
+        # --- 预计算 B样条基矩阵 M ---
+        # 结果 shape: [future_steps, num_ctrl]
+        # 注册为 buffer，这样 device 会自动管理，且不作为参数更新
+        self.register_buffer("basis_matrix", self._precompute_basis(future_steps, num_control_points, degree))
+
+    def _precompute_basis(self, T, n, p):
+        """
+        使用 Cox-de Boor 递归公式计算均匀 B-Spline 基矩阵
+        T: 时间步数
+        n: 控制点数量
+        p: 阶数 (degree)
+        """
+        # 1. 定义节点向量 (Knot Vector)
+        # Clamped Knot Vector: 开头结尾重复 p+1 次，中间均匀分布
+        # 节点总数 m = n + p + 1
+        m = n + p + 1
+        
+        # 内部节点数
+        num_inner = m - 2 * (p + 1)
+        
+        # 构造节点向量 u_vec: [0,0,0,0, 0.2, 0.4..., 1,1,1,1]
+        inner_knots = torch.linspace(0, 1, num_inner + 2)[1:-1]
+        knots = torch.cat([
+            torch.zeros(p + 1),
+            inner_knots,
+            torch.ones(p + 1)
+        ])
+        
+        # 2. 评估时间点 t (归一化到 [0,1])
+        t = torch.linspace(0, 1, T)
+        
+        # 3. Cox-de Boor 递归计算基函数值 N_{i,p}(t)
+        # 为了矩阵计算，我们计算所有 i 和所有 t
+        
+        # 初始化 0阶基函数
+        # Basis shape: [m-1, T] -> 代表 N_{i,0}(t)
+        basis = torch.zeros(m - 1, T)
+        for i in range(m - 1):
+            # N_{i,0}(t) = 1 if knots[i] <= t < knots[i+1]
+            mask = (t >= knots[i]) & (t < knots[i+1])
+            # 处理 t=1 的边界情况 (属于最后一个区间)
+            if knots[i+1] == 1.0: 
+                mask = mask | (t == 1.0)
+            basis[i, mask] = 1.0
+            
+        # 递归 p 次
+        for d in range(1, p + 1):
+            new_basis = torch.zeros(m - 1 - d, T)
+            for i in range(m - 1 - d):
+                # Term 1
+                numer1 = (t - knots[i])
+                denom1 = (knots[i+d] - knots[i])
+                term1 = 0.0
+                if denom1 != 0:
+                    term1 = (numer1 / denom1) * basis[i]
+                
+                # Term 2
+                numer2 = (knots[i+d+1] - t)
+                denom2 = (knots[i+d+1] - knots[i+1])
+                term2 = 0.0
+                if denom2 != 0:
+                    term2 = (numer2 / denom2) * basis[i+1]
+                    
+                new_basis[i] = term1 + term2
+            basis = new_basis
+            
+        # 最终 basis shape 是 [n, T]
+        # 转置为 [T, n] 以便做 M * C
+        return basis.t()
+
+    def forward(self, x):
+        B, T, D = x.shape
+        x_flat = x.view(B, -1)
+        
+        aggregated_x = self.aggregation_layer(x_flat)
+        x_modes = self.multimodal_proj(aggregated_x).view(-1, 6, self.embed_dim)
+        
+        # 1. 预测控制点 (偏移量)
+        pred_offsets = self.loc(x_modes).view(B, 6, self.num_ctrl - 1, 2)
+        
+        # 2. 构造完整控制点矩阵
+        # P0 固定为 (0,0)
+        zeros = torch.zeros(B, 6, 1, 2, device=x.device)
+        ctrl_points = torch.cat([zeros, pred_offsets], dim=2) # [B, 6, num_ctrl, 2]
+        
+        # 3. 生成轨迹 (矩阵乘法)
+        # Basis Matrix: [T, num_ctrl]
+        # Ctrl Points:  [B, 6, num_ctrl, 2]
+        # Result:       [B, 6, T, 2]
+        # 这里的 matmul 需要广播
+        # basis: [1, 1, T, N]
+        basis = self.basis_matrix.unsqueeze(0).unsqueeze(0) 
+        
+        # ctrl: [B, 6, N, 2] -> 也可以看作 [... N, 2]
+        # [1, 1, T, N] x [B, 6, N, 2] -> [B, 6, T, 2]
+        # PyTorch matmul 会自动广播前面的维度，只要最后两维匹配
+        pred_loc = torch.matmul(basis, ctrl_points) 
+        
+        if self.return_prob:
+            pi_logits = self.pi(x_modes).squeeze(-1)
+            probs = F.softmax(pi_logits, dim=-1)
+        else:
+            pi_logits, probs = None, None
+
+        return {
+            "y_hat": pred_loc,
+            "logits": pi_logits, 
+            "pi": probs,
+            # "control_points": ctrl_points
+        }
+    
 
 class MLPExpert(nn.Module):
     def __init__(self, d_model, prediction_horizon, drop=0.0, num_heads=8,

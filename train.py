@@ -22,27 +22,27 @@ def main(cfg):
         callbacks=callbacks,
         **cfg.trainer
     )
-    tuner = Tuner(trainer)
-    lr_finder = tuner.lr_find(
-                        model,
-                        datamodule=datamodule,
-                        min_lr=1e-6,
-                        max_lr=1e-1,
-                        num_training=1000,  # 只跑 200 个 batch
-                        mode='exponential',  # 推荐 exponential（默认）
-                        early_stop_threshold=None  # 防止提前停（轨迹预测 loss 可能波动大）
-                        )
+    # tuner = Tuner(trainer)
+    # lr_finder = tuner.lr_find(
+    #                     model,
+    #                     datamodule=datamodule,
+    #                     min_lr=1e-6,
+    #                     max_lr=1e-1,
+    #                     num_training=1000,  # 只跑 200 个 batch
+    #                     mode='exponential',  # 推荐 exponential（默认）
+    #                     early_stop_threshold=None  # 防止提前停（轨迹预测 loss 可能波动大）
+    #                     )
 
-    suggested_lr = lr_finder.suggestion()
-    print(f"✅ Suggested LR: {suggested_lr:.2e}")
+    # suggested_lr = lr_finder.suggestion()
+    # print(f"✅ Suggested LR: {suggested_lr:.2e}")
 
-    # 可视化
-    fig = lr_finder.plot(suggest=True)
-    fig.savefig("lr_finder.png")
+    # # 可视化
+    # fig = lr_finder.plot(suggest=True)
+    # fig.savefig("lr_finder.png")
     # fig.show()  # 或 fig.savefig("lr_finder.png")
 
-    # trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.checkpoint)
-    # trainer.validate(model, datamodule.val_dataloader())
+    trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.checkpoint)
+    trainer.validate(model, datamodule.val_dataloader())
 
 
 if __name__ == "__main__":

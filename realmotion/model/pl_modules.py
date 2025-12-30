@@ -47,6 +47,7 @@ class BaseLightningModule(pl.LightningModule):
 
     def forward(self, data, mode):
         return self.model(data, mode)
+    
     def cal_loss(self, out, data, tag=''):
         y_hat, pi, y_hat_others = out['y_hat'], out['pi'], out['y_hat_others']
         new_y_hat = out.get('new_y_hat', None)
@@ -1322,6 +1323,102 @@ class Cross_moe_mlp_Module(BaseLightningModule):
         )
 
 class BezierModule(MoeLightningModule):
+
+    def velocity_direction_loss(self, pred_traj, gt_traj, eps=1e-8):
+        # 中心差分：t=1 到 T-2（共 T-2 个点）
+        pred_vel = pred_traj[:, 2:, :] - pred_traj[:, :-2, :]  # [B, T-2, 2]
+        gt_vel   = gt_traj[:, 2:, :] - gt_traj[:, :-2, :]      # [B, T-2, 2]
+
+        # 单位方向向量
+        pred_dir = pred_vel / (torch.norm(pred_vel, dim=-1, keepdim=True) + eps)
+        gt_dir   = gt_vel / (torch.norm(gt_vel, dim=-1, keepdim=True) + eps)
+
+        # 余弦相似度损失：1 - cosθ
+        cosine_sim = (pred_dir * gt_dir).sum(dim=-1)  # [B, T-2]
+        return (1.0 - cosine_sim).mean()
+    def velocity_avg_loss(self, pred_traj, gt_traj, dt=0.1):
+        pred_vel = (pred_traj[:, 2:, :] - pred_traj[:, :-2, :]) / (2 * dt)  # [B, T-2, 2]
+        gt_vel   = (gt_traj[:, 2:, :] - gt_traj[:, :-2, :]) / (2 * dt)      # [B, T-2, 2]
+        return F.mse_loss(pred_vel, gt_vel)
+
+    def bezier_velocity_direction_loss_from_ctrl(self, ctrl_pts, gt_traj, T=60, eps=1e-8):
+        """
+        从多段贝塞尔控制点计算速度方向损失（单模态）
+        ctrl_pts: [B, M, N_ctrl, 2]
+        gt_traj:  [B, T, 2]
+        """
+        B, M, N_ctrl, _ = ctrl_pts.shape
+        device = ctrl_pts.device
+
+        # 预先计算二项式系数
+        import math
+        n = N_ctrl - 1
+        binom_coeffs = torch.tensor([math.comb(n, i) for i in range(N_ctrl)], 
+                                dtype=ctrl_pts.dtype, device=device)
+        binom_n1_coeffs = torch.tensor([math.comb(n - 1, i) for i in range(max(1, n))], 
+                                    dtype=ctrl_pts.dtype, device=device) if n > 0 else torch.tensor([], dtype=ctrl_pts.dtype, device=device)
+
+        # 均匀分配每段采样点数
+        steps_per_seg = T // M
+        remainder = T % M
+        traj_list = []
+        deriv_list = []
+
+        for seg in range(M):
+            n_steps = steps_per_seg + (1 if seg < remainder else 0)
+            t_vals = torch.linspace(0, 1, n_steps, device=device)  # [n_steps]
+            t_vals = t_vals.view(1, -1, 1)  # [1, n_steps, 1]
+            seg_ctrl = ctrl_pts[:, seg, :, :].unsqueeze(1)  # [B, 1, N_ctrl, 2]
+
+            # Bernstein 基
+            i = torch.arange(N_ctrl, device=device).view(1, 1, N_ctrl)
+            binom = binom_coeffs.view(1, 1, N_ctrl)
+            bernstein = binom * (t_vals ** i) * ((1 - t_vals) ** (n - i))  # [1, n_steps, N_ctrl]
+
+            # 位置
+            pos = (bernstein.unsqueeze(-1) * seg_ctrl).sum(dim=-2)  # [B, n_steps, 2]
+            traj_list.append(pos)
+
+            # 导数（d/dt）
+            if N_ctrl == 1:
+                dpos = torch.zeros_like(pos)
+            else:
+                j = torch.arange(n, device=device).view(1, 1, n)
+                binom_n1 = binom_n1_coeffs.view(1, 1, n)
+                B_n1 = binom_n1 * (t_vals ** j) * ((1 - t_vals) ** (n - 1 - j))  # [1, n_steps, n]
+                dB = torch.zeros(B, n_steps, N_ctrl, device=device)
+                dB[:, :, 1:] += n * B_n1  # +n * B_{i-1}
+                dB[:, :, :-1] -= n * B_n1  # -n * B_i
+                dpos = (dB.unsqueeze(-1) * seg_ctrl).sum(dim=-2)  # [B, n_steps, 2]
+            deriv_list.append(dpos)
+
+        full_pred_traj = torch.cat(traj_list, dim=1)      # [B, T, 2]
+        full_deriv_dt  = torch.cat(deriv_list, dim=1)     # [B, T, 2] → d/dt
+
+        # 只用导数方向（与物理速度大小无关）
+        pred_dir = full_deriv_dt / (torch.norm(full_deriv_dt, dim=-1, keepdim=True) + eps)
+
+        # 真实方向（中心差分）
+        gt_vel = gt_traj[:, 2:, :] - gt_traj[:, :-2, :]
+        gt_dir = gt_vel / (torch.norm(gt_vel, dim=-1, keepdim=True) + eps)
+
+        # 对齐有效区间：预测导数有 T 点，但 gt 方向只有 T-2 点
+        pred_dir_valid = pred_dir[:, 1:-1, :]  # [B, T-2, 2]
+
+        cosine_sim = (pred_dir_valid * gt_dir).sum(dim=-1)  # [B, T-2]
+        return (1.0 - cosine_sim).mean()
+    def c1_continuity_loss(self,ctrl_pts):
+        B, M, N_ctrl, _ = ctrl_pts.shape
+        if M < 2:
+            return torch.tensor(0.0, device=ctrl_pts.device)
+        
+        loss = 0.0
+        for m in range(M - 1):
+            d_end = ctrl_pts[:, m, -1, :] - ctrl_pts[:, m, -2, :]       # [B, 2]
+            d_start_next = ctrl_pts[:, m+1, 1, :] - ctrl_pts[:, m+1, 0, :]
+            loss += F.mse_loss(d_end, d_start_next)
+        return loss / (M - 1)
+
     def cal_loss(self, out, data, tag=''):
         y_hat, pi, y_hat_others = out['y_hat'], out['pi'], out['y_hat_others']
         new_y_hat = out.get('new_y_hat', None)
@@ -1361,23 +1458,33 @@ class BezierModule(MoeLightningModule):
             cos_sim = (v_in_norm * v_out_norm).sum(dim=-1) 
             loss_smooth = (1.0 - cos_sim).mean()
 
+        # loss_vel = self.velocity_direction_loss(y_hat_best, y)
+        # loss_vel = self.velocity_avg_loss(y_hat_best, y)
+        # loss_vel = self.bezier_velocity_direction_loss_from_ctrl(pred_ctrl[torch.arange(y_hat.shape[0]), best_mode], y)
 
+        # ctrl_loss = self.c1_continuity_loss(pred_ctrl[torch.arange(y_hat.shape[0]), best_mode])
+        # bezier = data['bezier_points'][:, 0]
+        # bezier_loss = F.mse_loss(pred_ctrl[torch.arange(y_hat.shape[0]), best_mode], bezier)
         loss = agent_reg_loss 
         + agent_cls_loss 
         + others_reg_loss 
         + new_agent_reg_loss 
         + 1 * loss_smooth
+        # + 1 * loss_vel
+        # + 1 * ctrl_loss
+        # + 1 * bezier_loss
+
         disp_dict = {
             f'{tag}loss': loss.item(),
             f'{tag}reg_loss': agent_reg_loss.item(),
             f'{tag}cls_loss': agent_cls_loss.item(),
             f'{tag}others_reg_loss': others_reg_loss.item(),
-            f'{tag}smooth_loss': loss_smooth.item(),
+            # f'{tag}smooth_loss': loss_smooth.item(),
+            # f'{tag}vel_loss': loss_vel.item(),
+            # f'{tag}ctrl_loss': ctrl_loss.item(),
         }
         if new_y_hat is not None:
             disp_dict[f'{tag}reg_loss_refine'] = new_agent_reg_loss.item()
-        if pred_ctrl is not None:
-            disp_dict[f'{tag}smooth_loss'] = loss_smooth.item()
 
         return loss, disp_dict
 
@@ -1387,7 +1494,7 @@ class BezierModule(MoeLightningModule):
         out = self(data, True)
         
         out['pi'] = out['y_hat']['logits']
-        out['control_points'] = out['y_hat']['control_points']
+        out['control_points'] = out['y_hat'].get('control_points', None)
         out['y_hat'] = out['y_hat']['y_hat']
         loss, loss_dict = self.cal_loss(out, data)
         self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
@@ -1398,7 +1505,7 @@ class BezierModule(MoeLightningModule):
             data = data[-1]
         out = self(data, False)
         out['pi'] = out['y_hat']['logits']
-        out['control_points'] = out['y_hat']['control_points']
+        out['control_points'] = out['y_hat'].get('control_points', None)
         out['y_hat'] = out['y_hat']['y_hat']
         
         _, loss_dict = self.cal_loss(out, data)
