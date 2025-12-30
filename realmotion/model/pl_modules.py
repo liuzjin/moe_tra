@@ -1520,3 +1520,86 @@ class BezierModule(MoeLightningModule):
             batch_size=1,
             sync_dist=True,
         )
+
+class Cross_Spline_Module(MoeLightningModule):
+    def __init__(self,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.laplace_loss = LaplaceNLLLoss()
+    def cal_loss(self, out, data, tag=""):
+        y_hat, pi, y_hat_others = out["y_hat"]['y_hat'], out["y_hat"]["pi"], out["y_hat_others"]
+        scal = out["y_hat"]["scal"]
+
+        # gt
+        y, y_others = data["target"][:, 0], data["target"][:, 1:]
+
+
+        # loss for output of mode query
+        l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+        best_mode = torch.argmin(l2_norm, dim=-1)
+        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
+        agent_cls_loss = F.cross_entropy(pi, best_mode.detach(), label_smoothing=0.2)
+        
+
+        # loss for other agents
+        others_reg_mask = data["target_mask"][:, 1:]
+        others_reg_loss = F.smooth_l1_loss(
+            y_hat_others[others_reg_mask], y_others[others_reg_mask]
+        )
+
+        # Laplace loss, which is not necessary
+        predictions = {}
+        predictions['traj'] = y_hat
+        predictions['scale'] = scal
+        predictions['probs'] = pi
+        laplace_loss = self.laplace_loss.compute(predictions, y)
+
+
+        # total loss
+        loss = agent_reg_loss + agent_cls_loss + others_reg_loss   
+        loss = loss + laplace_loss 
+
+        disp_dict = {
+            # f"{tag}ms_loss": ms_loss.item(),
+            f"{tag}loss": loss.item(),
+            f"{tag}reg_loss": agent_reg_loss.item(),
+            f"{tag}cls_loss": agent_cls_loss.item(),
+            f"{tag}others_reg_loss": others_reg_loss.item(),
+            f"{tag}laplace_loss": laplace_loss.item(),
+        }
+
+
+        return loss, disp_dict
+
+    def training_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
+        self.train()
+        out = self(data, True)
+        loss, loss_dict = self.cal_loss(out,data)
+
+        self.log_dict({f'train/{k}': v for k, v in loss_dict.items()}, prog_bar=True)
+        self.log('train/loss', loss, prog_bar=True)
+        return loss
+    def validation_step(self, data, batch_idx):
+        if isinstance(data, list):
+            data = data[-1]
+        out = self(data, False)
+        
+        _, loss_dict = self.cal_loss(out, data)
+        out = {
+            'y_hat': out['y_hat']['y_hat'],
+            'pi': out['y_hat']['pi']
+        }
+        metrics = self.metrics(out, data['target'][:, 0])
+        self.log_dict({f"val/{k}": v for k, v in loss_dict.items()}, 
+                    on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(
+            metrics,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=1,
+            sync_dist=True,
+        )

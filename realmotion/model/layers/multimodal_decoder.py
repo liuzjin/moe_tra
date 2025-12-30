@@ -436,7 +436,76 @@ class BSpline_Decoder(MultimodalDecoder):
             "pi": probs,
             # "control_points": ctrl_points
         }
-    
+
+class Cross_BSpline_Decoder(nn.Module):
+    def __init__(
+        self,
+        embed_dim=256,
+        future_steps=60,      # T
+        num_modes = 6,     
+        num_heads = 8,
+        mlp_ratio = 4.0,
+        qkv_bias = False,
+        drop = 0.2,
+        attn_drop = 0.2,
+        drop_path= 0.2,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        query_cross_layers=2,
+        num_control_points=12, 
+        degree=3
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.future_steps = future_steps
+        self.num_modes = num_modes
+
+        # 融合权重（可学习）
+        self.fusion_w = nn.Parameter(torch.ones(3))
+
+        self.mode_queries = nn.Parameter(torch.randn( self.num_modes, self.embed_dim))
+        self.query_mode =nn.ModuleList(Inter_cross_self_Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                ) for i in range(query_cross_layers))
+        self.predictor = BSpline_GMM_Predictor(future_len=future_steps, dim=embed_dim, num_control_points=num_control_points, degree=degree)
+ 
+    def forward(
+        self,
+        context: torch.Tensor,      # [B, N, D]
+        segment: int,   # [B, 2]
+        key_padding_mask=None,
+        lane_mask=None,
+    ):
+        """
+        Returns:
+            trajectories: [B, M, T, 2]  # M 条未来轨迹
+            confidences:  [B, M]       # 每条轨迹的未归一化置信度（logits）
+        """
+        B = context.shape[0]
+        # self.visualize_intent_table(self.intent_bank)
+
+        # --- 步骤 1: 初始化 K 个模态的“思考状态” ---
+        mode = self.mode_queries.expand(B, -1, -1) # (B, K, D)
+        
+        for blk in self.query_mode:
+            mode = blk(src=mode, src_kv=context, key_padding_mask=key_padding_mask)
+        y_hat, pi, scal = self.predictor(mode)
+
+        return {
+        # "weights": weights,
+        "mode": mode, 
+        "y_hat": y_hat,      # [B, M, T, 2]
+        "pi": pi,              # [B, M]
+        "scal": scal,             # [B, M, T, 2]
+    }
 
 class MLPExpert(nn.Module):
     def __init__(self, d_model, prediction_horizon, drop=0.0, num_heads=8,
@@ -2340,6 +2409,117 @@ class GMMPredictor(nn.Module):
 
         return res, score, scal
 
+
+
+class BSpline_GMM_Predictor(nn.Module):
+    def __init__(self, future_len=60, dim=128, num_control_points=12, degree=3):
+        """
+        Args:
+            future_len: 预测的时间步长 (比如 60)
+            dim: 输入特征维度 (比如 128)
+            num_control_points: B样条控制点数量 (建议 10-15)
+            degree: B样条阶数 (建议 3)
+        """
+        super(BSpline_GMM_Predictor, self).__init__()
+        self._future_len = future_len
+        self.num_ctrl = num_control_points
+        
+        # --- 1. 轨迹均值预测 (改用 B样条控制点) ---
+        # 原来是预测 future_len * 2，现在预测 (num_control_points - 1) * 2
+        # 我们假设 P0 固定为 (0,0)，所以少预测一个点
+        self.ctrl_point_head = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.GELU(),
+            nn.Linear(256, (self.num_ctrl - 1) * 2) 
+        )
+        
+        # --- 2. 不确定性/尺度预测 (保持 MLP) ---
+        # 这一部分不需要变，依然预测每个时间步的 laplace scale
+        self.scale = nn.Sequential(
+            nn.Linear(dim, 256), 
+            nn.GELU(), 
+            nn.Linear(256, self._future_len * 2)
+        )
+        
+        # --- 3. 意图打分 (保持 MLP) ---
+        self.score = nn.Sequential(
+            nn.Linear(dim, 64), 
+            nn.GELU(), 
+            nn.Linear(64, 1),
+        )
+
+        # --- 4. 预计算 B样条基矩阵 ---
+        # shape: [future_len, num_control_points]
+        basis = self._precompute_basis(future_len, num_control_points, degree)
+        self.register_buffer("basis_matrix", basis)
+
+    def _precompute_basis(self, T, n, p):
+        """
+        Cox-de Boor 算法预计算基矩阵 (同之前的代码)
+        """
+        m = n + p + 1
+        num_inner = m - 2 * (p + 1)
+        inner_knots = torch.linspace(0, 1, num_inner + 2)[1:-1]
+        knots = torch.cat([torch.zeros(p + 1), inner_knots, torch.ones(p + 1)])
+        
+        t = torch.linspace(0, 1, T)
+        basis = torch.zeros(m - 1, T)
+        
+        # 0阶
+        for i in range(m - 1):
+            mask = (t >= knots[i]) & (t < knots[i+1])
+            if knots[i+1] == 1.0: mask = mask | (t == 1.0)
+            basis[i, mask] = 1.0
+            
+        # 递归升阶
+        for d in range(1, p + 1):
+            new_basis = torch.zeros(m - 1 - d, T)
+            for i in range(m - 1 - d):
+                numer1 = (t - knots[i])
+                denom1 = (knots[i+d] - knots[i])
+                term1 = (numer1 / denom1) * basis[i] if denom1 != 0 else 0.0
+                
+                numer2 = (knots[i+d+1] - t)
+                denom2 = (knots[i+d+1] - knots[i+1])
+                term2 = (numer2 / denom2) * basis[i+1] if denom2 != 0 else 0.0
+                
+                new_basis[i] = term1 + term2
+            basis = new_basis
+            
+        # 返回转置 [T, n]
+        return basis.t()
+
+    def forward(self, input):
+        """
+        input: [B, M, dim]  (Batch, Modes, HiddenDim)
+        """
+        B, M, _ = input.shape
+        
+        # --- A. 计算 B样条轨迹 (res) ---
+        # 1. 预测控制点偏移量 [B, M, N-1, 2]
+        pred_offsets = self.ctrl_point_head(input).view(B, M, self.num_ctrl - 1, 2)
+        
+        # 2. 拼接原点 P0=(0,0) -> [B, M, N, 2]
+        zeros = torch.zeros(B, M, 1, 2, device=input.device)
+        ctrl_points = torch.cat([zeros, pred_offsets], dim=2)
+        
+        # 3. 矩阵乘法生成轨迹
+        # basis: [T, N] -> 扩充为 [1, 1, T, N]
+        # ctrl_points: [B, M, N, 2]
+        # result: [B, M, T, 2]
+        basis = self.basis_matrix.unsqueeze(0).unsqueeze(0)
+        res = torch.matmul(basis, ctrl_points) 
+        
+        # --- B. 计算不确定性 (scal) ---
+        # 保持原来的逻辑，直接输出 [B, M, T, 2]
+        scal = F.elu_(self.scale(input), alpha=1.0) + 1.0 + 0.0001
+        scal = scal.view(B, M, self._future_len, 2) 
+        
+        # --- C. 计算分数 (score) ---
+        score = self.score(input).squeeze(-1) # [B, M]
+
+        return res, score, scal
+    
 class VQIntentBank(nn.Module):
     def __init__(self, K, D, beta=0.25):
         super().__init__()

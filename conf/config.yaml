@@ -18,10 +18,15 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_Linear
 
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: Bezier_Linear
+
 defaults:
   - _self_
   - datamodule: av2_moe
-  - model: Bezier_Linear
+  - model: cross_Bspline
 
 # defaults:
 #   - _self_
@@ -100,7 +105,7 @@ trainer:
   gradient_clip_algorithm: norm
   sync_batchnorm: true
   default_root_dir: ${output_dir}
-  fast_dev_run: 0
+  fast_dev_run: 1
   num_sanity_val_steps: 1
   detect_anomaly: False
 
