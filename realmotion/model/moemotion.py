@@ -173,7 +173,7 @@ class MoeMotion(nn.Module):
                     query_cross_layers=query_cross_layers,
                     )
             elif moe_type == "intent_linear":
-                self.decoder = MultiModalIntentDecoder2(
+                self.decoder = MultiModalIntentDecoder(
                     embed_dim=embed_dim,
                     num_intents = num_experts,       # 意图表大小 K
                     future_steps=future_len,      # T

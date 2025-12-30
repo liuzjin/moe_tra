@@ -13,20 +13,20 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_regres
 
-# defaults:
-#   - _self_
-#   - datamodule: av2_moe
-#   - model: MoeMotion_Linear
+defaults:
+  - _self_
+  - datamodule: av2_moe
+  - model: MoeMotion_Linear
 
 # defaults:
 #   - _self_
 #   - datamodule: av2_moe
 #   - model: Bezier_Linear
 
-defaults:
-  - _self_
-  - datamodule: av2_moe
-  - model: cross_Bspline
+# defaults:
+#   - _self_
+#   - datamodule: av2_moe
+#   - model: cross_Bspline
 
 # defaults:
 #   - _self_

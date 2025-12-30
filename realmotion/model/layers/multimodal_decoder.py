@@ -2845,15 +2845,15 @@ class MultiModalIntentDecoder(nn.Module):
         self.output_dim = output_dim
 
         # === 共享组件 ===
-        # self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
-        # nn.init.xavier_uniform_(self.intent_bank)
+        self.intent_bank = nn.Parameter(torch.randn(num_intents, embed_dim))
+        nn.init.xavier_uniform_(self.intent_bank)
         # self.intent_bank = VQIntentBank(num_intents, embed_dim)
-        self.intent_bank_s = nn.Parameter(torch.randn(num_intents, embed_dim))   # 短程
-        self.intent_bank_m = nn.Parameter(torch.randn(6, embed_dim))   # 中程
-        self.intent_bank_l = nn.Parameter(torch.randn(4, embed_dim))   # 长程
-        nn.init.xavier_uniform_(self.intent_bank_s)
-        nn.init.xavier_uniform_(self.intent_bank_m)
-        nn.init.xavier_uniform_(self.intent_bank_l)
+        # self.intent_bank_s = nn.Parameter(torch.randn(num_intents, embed_dim))   # 短程
+        # self.intent_bank_m = nn.Parameter(torch.randn(6, embed_dim))   # 中程
+        # self.intent_bank_l = nn.Parameter(torch.randn(4, embed_dim))   # 长程
+        # nn.init.xavier_uniform_(self.intent_bank_s)
+        # nn.init.xavier_uniform_(self.intent_bank_m)
+        # nn.init.xavier_uniform_(self.intent_bank_l)
         # 融合权重（可学习）
         self.fusion_w = nn.Parameter(torch.ones(3))
 
@@ -3035,10 +3035,10 @@ class MultiModalIntentDecoder(nn.Module):
 
         # Step 4: 软查询意图表 → 每个 (b,m,t) 得到意图嵌入
         # logits: [B, M, T, K]
-        # logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
-        # weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
-        # intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
-        intent_seq = self.pyramid_intent_seq(mode_dense)
+        logits = torch.einsum('bmtd,kd->bmtk', mode_dense, self.intent_bank)
+        weights = F.softmax(logits / self.temp, dim=-1)  # [B, M, T, K]
+        intent_seq = torch.einsum('bmtk,kd->bmtd', weights, self.intent_bank)  # [B, M, T, D]
+        # intent_seq = self.pyramid_intent_seq(mode_dense)
         # z = mode_dense.reshape(-1, C)          # (B*M*T, D)
         # z_q, idx, vq_loss = self.intent_bank(z)
         # idx = idx.reshape(B, M, T)
