@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from .layers.agent_embedding import AgentEmbeddingLayer, AgentEmbeddingLayer_light
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import  BSpline_Decoder, Bezier_decoder, Cross_BSpline_Decoder, HierarchicalDecoder, MoE_QueryDecoder, Multi_Bezier_decoder, MultiModalIntentDecoder, MultiModalIntentDecoder2, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
+from .layers.multimodal_decoder import  BSpline_Decoder, Bezier_decoder, Cross_BSpline_Decoder, HierarchicalDecoder, LearnableTime_Bezier_Decoder, MoE_QueryDecoder, Multi_Bezier_decoder, MultiModalIntentDecoder, MultiModalIntentDecoder2, MultimodalDecoder, QuerrySegmentDecoder, QueryBasedMoeDecoder, RefinementDecoder, Regress_refine, Regress_refine_v2, RegressionSegmentDecoder, RegressionSegmentDecoder2, SimpleSegmentalMoeDecoder
 from .layers.transformer_blocks import Block, InterBlock, InteractionModule
 
 
@@ -202,7 +202,9 @@ class MoeMotion(nn.Module):
             elif moe_type == "bspline":
                 self.decoder = BSpline_Decoder(embed_dim=embed_dim, future_steps=future_len, num_input_tokens=self.num_segments,  
                  num_control_points=num_control_points, degree=bezier_points)
-
+            elif moe_type == "time_bezier":
+                self.decoder = LearnableTime_Bezier_Decoder(embed_dim=embed_dim, future_steps=future_len, num_input_tokens=self.num_segments,  
+                 num_bezier_segments=num_bezier_segments, bezier_degree=bezier_points)
             else:
                 self.decoder = MultimodalDecoder(embed_dim, future_steps,self.num_segments)
         self.dense_predictor = nn.Sequential(

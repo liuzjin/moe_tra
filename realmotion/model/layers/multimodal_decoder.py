@@ -299,6 +299,183 @@ class Multi_Bezier_decoder(MultimodalDecoder):
             "control_points": final_ctrl_points 
         }
 
+
+class LearnableTime_Bezier_Decoder(MultimodalDecoder):
+    """
+    方案一：分段贝塞尔 + C1连续性约束 + 可学习时间比例
+    """
+    def __init__(self, embed_dim, future_steps, num_input_tokens=5, return_prob=True, 
+                 num_bezier_segments=3, bezier_degree=3):
+        super().__init__(embed_dim, future_steps, num_input_tokens, return_prob)
+        
+        self.num_segments = num_bezier_segments
+        self.degree = bezier_degree
+        self.future_steps = future_steps # e.g. 60 frames
+        
+        # -----------------------------------------------------------
+        # 定义输出维度
+        # 1. 第一段: 需要预测 P1, P2, P3 (3个点)
+        # 2. 后续段: 为了保证 C1 连续，P1 是受限的(只需预测长度标量), 
+        #    只需要预测 P2, P3 (2个点)
+        #    因此自由度 = 3 + (num_segments-1) * 2
+        
+        # -----------------------------------------------------------
+        num_geo_params = self.degree * 2 + (1 + (self.degree - 1) * 2 ) * (self.num_segments - 1)
+        # 如果 degree=3, seg=3, param = 2 * (3 + 2*2) = 14
+        
+        # 时间参数: 每一段的时间比例 logits (num_segments 个标量)
+        num_time_params = self.num_segments
+        
+        self.total_params = num_geo_params + num_time_params
+
+        self.loc = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, self.total_params),
+        )
+
+
+    def forward(self, x):
+        B, T, D = x.shape
+        x_flat = x.view(B, -1)
+        
+        aggregated_x = self.aggregation_layer(x_flat)
+        x_modes = self.multimodal_proj(aggregated_x).view(-1, 6, self.embed_dim)
+        
+        # 预测所有参数
+        preds = self.loc(x_modes) # [B, 6, total_params]
+        
+        # --- 1. 解析时间参数 ---
+        # 提取最后 num_segments 个值作为时间 logits
+        time_logits = preds[..., -self.num_segments:] # [B, 6, Seg]
+        # Softmax 归一化得到每一段的时间比例
+        time_props = F.softmax(time_logits, dim=-1) # [B, 6, Seg]
+        # 计算每一段的时间长度 (单位: 帧数)
+        seg_durations = time_props * self.future_steps
+        # 计算时间断点 (Cutoff times): t_0=0, t_1, t_2...
+        cutoffs = torch.cumsum(seg_durations, dim=-1) # [B, 6, Seg]
+        cutoffs = torch.cat([torch.zeros_like(cutoffs[..., :1]), cutoffs], dim=-1) # [B, 6, Seg+1]
+
+        # --- 2. 解析几何控制点 (关键：C1 约束) ---
+        geo_params = preds[..., :-self.num_segments] 
+        # 我们需要逐步构建控制点列表
+        # list of [B, 6, degree+1, 2]
+        ctrl_points_list = [] 
+        
+        # 指针，用于从 geo_params 中切片取值
+        ptr = 0
+        
+        # 起点 P0 始终是 (0,0)
+        current_end_pos = torch.zeros(B, 6, 2, device=x.device)
+        # 记录上一段末端的切线向量 (P_n - P_{n-1})
+        prev_tangent = None 
+        
+        for i in range(self.num_segments):
+            # 当前段的 P0 等于上一段的 P_n
+            p0 = current_end_pos.unsqueeze(2) # [B, 6, 1, 2]
+            
+            if i == 0:
+                # 第一段：完全自由预测 P1, P2... Pn
+                # 取出 degree 个点 (e.g. 3个: P1, P2, P3)
+                num_pts = self.degree
+                pts_flat = geo_params[..., ptr : ptr + num_pts*2]
+                ptr += num_pts * 2
+                
+                # 预测的是相对位移，累加得到绝对坐标
+                # 这里简化处理：预测的是相对于 P0 的绝对坐标 (也可以做成累加offset)
+                pts_rel = pts_flat.view(B, 6, num_pts, 2)
+                pts_abs = p0 + pts_rel 
+                
+                segment_ctrls = torch.cat([p0, pts_abs], dim=2) # [B, 6, 4, 2]
+            
+            else:
+                # 后续段：实施 C1 约束
+                # 1. 计算 P1: 必须在 prev_tangent 方向上
+                # 预测一个标量 lambda (取exp保证为正)
+                lambda_val = torch.exp(geo_params[..., ptr : ptr+1]) # [B, 6, 1]
+                ptr += 1
+                
+                # Normalize prev tangent to avoid scale issues
+                tangent_dir = F.normalize(prev_tangent, dim=-1) 
+                p1 = p0.squeeze(2) + lambda_val * tangent_dir # [B, 6, 2]
+                
+                # 2. 预测剩下的点 P2...Pn
+                num_rem = self.degree - 1 # e.g. 2个
+                pts_flat = geo_params[..., ptr : ptr + num_rem*2]
+                ptr += num_rem * 2
+                pts_rel = pts_flat.view(B, 6, num_rem, 2)
+                
+                # 这些点通常相对于 P1 做 offset 比较好学习
+                pts_abs = p1.unsqueeze(2) + pts_rel 
+                
+                segment_ctrls = torch.cat([p0, p1.unsqueeze(2), pts_abs], dim=2)
+
+            # 更新状态供下一段使用
+            ctrl_points_list.append(segment_ctrls)
+            current_end_pos = segment_ctrls[..., -1, :]
+            prev_tangent = segment_ctrls[..., -1, :] - segment_ctrls[..., -2, :]
+        
+        # --- 3. 采样轨迹 (Soft Masking) ---
+        # 构造查询时间 t: [0, 1, ..., 59]
+        t_grid = torch.arange(self.future_steps, device=x.device).float() # [T]
+        t_grid = t_grid.view(1, 1, -1) # [1, 1, T] 广播用
+        
+        final_pos = 0
+        
+        for i in range(self.num_segments):
+            # 获取该段的时间范围 [start, end]
+            t_start = cutoffs[..., i].unsqueeze(-1)   # [B, 6, 1]
+            t_end = cutoffs[..., i+1].unsqueeze(-1)   # [B, 6, 1]
+            
+            # 计算 Soft Mask (使用 steep sigmoid 近似阶跃)
+            # 这里的 beta=100 控制边缘陡峭程度
+            beta = 10.0 
+            mask = torch.sigmoid(beta * (t_grid - t_start)) * torch.sigmoid(beta * (t_end - t_grid))
+            # 归一化 mask 使得对于每个 t，sum(mask) = 1 (近似)
+            # 也可以在所有段算完后做 softmax，这里简化处理
+            
+            # 计算局部时间参数 u \in [0, 1]
+            # 为了防止除以0，分母加个 epsilon
+            duration = t_end - t_start + 1e-6
+            u = (t_grid - t_start) / duration
+            u = torch.clamp(u, 0.0, 1.0).unsqueeze(-1) # [B, 6, T, 1]
+            
+            # 计算该段贝塞尔曲线在 u 处的值
+            # ctrl_points: [B, 6, 4, 2]
+            # De Casteljau 或者 直接公式法。这里手写公式法 (Cubic)
+            p = ctrl_points_list[i] # [B, 6, 4, 2]
+            p0 = p[..., 0, :]
+            p1 = p[..., 1, :]
+            p2 = p[..., 2, :]
+            p3 = p[..., 3, :]
+            
+            # (1-u)^3 P0 + 3u(1-u)^2 P1 + 3u^2(1-u) P2 + u^3 P3
+            # 注意广播维度
+            bezier_pos = (1-u)**3 * p0.unsqueeze(2) + \
+                         3 * u * (1-u)**2 * p1.unsqueeze(2) + \
+                         3 * u**2 * (1-u) * p2.unsqueeze(2) + \
+                         u**3 * p3.unsqueeze(2)  # [B, 6, T, 2]
+            
+            # 累加到最终结果
+            final_pos = final_pos + mask.unsqueeze(-1) * bezier_pos
+            
+        pred_loc = final_pos # [B, 6, T, 2]
+
+        if self.return_prob:
+            pi_logits = self.pi(x_modes).squeeze(-1)
+            probs = F.softmax(pi_logits, dim=-1)
+        else:
+            pi_logits, probs = None, None
+
+        return {
+            "y_hat": pred_loc,
+            "logits": pi_logits,
+            "pi": probs,
+            "cutoffs": cutoffs # Debug用：可以看网络学到的切换时间
+        }
+
 class BSpline_Decoder(MultimodalDecoder):
     """
     方案二：B样条曲线 (隐式分段，数学平滑)

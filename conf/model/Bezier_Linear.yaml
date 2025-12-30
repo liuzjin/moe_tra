@@ -21,7 +21,7 @@ pl_module:
     mlp_drop: 0.0
     moe: False
     his_embed_moe: [True, True, True, True]
-    moe_type: "bspline"
+    moe_type: "time_bezier"
     query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1
