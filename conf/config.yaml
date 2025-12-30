@@ -78,8 +78,8 @@ intent_label: True
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
-    filename: epoch_{epoch}-minADE6_{minADE6}
-    monitor: minADE6
+    filename: epoch_{epoch}-minADE6_{new_minADE6}
+    monitor: new_minADE6
     mode: min
     save_top_k: 10
     auto_insert_metric_name: False
@@ -89,7 +89,7 @@ callbacks:
   - _target_: pytorch_lightning.callbacks.LearningRateMonitor
     logging_interval: epoch
   - _target_: pytorch_lightning.callbacks.EarlyStopping
-    monitor: minADE6
+    monitor: new_minADE6
     patience: 10
     mode: min
     verbose: true
