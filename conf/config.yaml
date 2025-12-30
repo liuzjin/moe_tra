@@ -13,15 +13,15 @@
 #   - datamodule: av2_moe
 #   - model: MoeMotion_moe_regres
 
-defaults:
-  - _self_
-  - datamodule: av2_moe
-  - model: MoeMotion_Linear
-
 # defaults:
 #   - _self_
 #   - datamodule: av2_moe
-#   - model: Bezier_Linear
+#   - model: MoeMotion_Linear
+
+defaults:
+  - _self_
+  - datamodule: av2_moe
+  - model: Bezier_Linear
 
 # defaults:
 #   - _self_
@@ -75,6 +75,8 @@ num_experts: 9
 future_len: 60
 history_len: 50
 intent_label: True
+degree: 3
+num_control_points: 12
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints

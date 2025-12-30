@@ -532,7 +532,8 @@ class BSpline_Decoder(MultimodalDecoder):
         ])
         
         # 2. 评估时间点 t (归一化到 [0,1])
-        t = torch.linspace(0, 1, T)
+        # t = torch.linspace(0, 1, T)
+        t = torch.linspace(0, 1, T + 1)[1:]
         
         # 3. Cox-de Boor 递归计算基函数值 N_{i,p}(t)
         # 为了矩阵计算，我们计算所有 i 和所有 t
@@ -611,7 +612,7 @@ class BSpline_Decoder(MultimodalDecoder):
             "y_hat": pred_loc,
             "logits": pi_logits, 
             "pi": probs,
-            # "control_points": ctrl_points
+            "control_points": ctrl_points
         }
 
 class Cross_BSpline_Decoder(nn.Module):

@@ -15,3 +15,5 @@ pl_module:
     n_step: ${n_step}
     radius: 150.0
     map_radius: 150.0
+    degree: ${degree}
+    num_control_points: ${num_control_points}

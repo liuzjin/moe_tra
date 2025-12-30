@@ -1445,40 +1445,42 @@ class BezierModule(MoeLightningModule):
             y_hat_others[others_reg_mask], y_others[others_reg_mask]
         )
         loss_smooth = 0.0
-        if pred_ctrl is not None:
-            v_in = pred_ctrl[:, :, :-1, -1, :] - pred_ctrl[:, :, :-1, -2, :] 
-            # 后一段的前两点向量
-            v_out = pred_ctrl[:, :, 1:, 1, :] - pred_ctrl[:, :, 1:, 0, :] 
+        # if pred_ctrl is not None:
+        #     v_in = pred_ctrl[:, :, :-1, -1, :] - pred_ctrl[:, :, :-1, -2, :] 
+        #     # 后一段的前两点向量
+        #     v_out = pred_ctrl[:, :, 1:, 1, :] - pred_ctrl[:, :, 1:, 0, :] 
             
-            v_in_norm = F.normalize(v_in, dim=-1, eps=1e-6)
-            v_out_norm = F.normalize(v_out, dim=-1, eps=1e-6)
+        #     v_in_norm = F.normalize(v_in, dim=-1, eps=1e-6)
+        #     v_out_norm = F.normalize(v_out, dim=-1, eps=1e-6)
             
-            # Cosine Embedding Loss target=1 (完全共线)
-            # dim=-1 求点积
-            cos_sim = (v_in_norm * v_out_norm).sum(dim=-1) 
-            loss_smooth = (1.0 - cos_sim).mean()
+        #     # Cosine Embedding Loss target=1 (完全共线)
+        #     # dim=-1 求点积
+        #     cos_sim = (v_in_norm * v_out_norm).sum(dim=-1) 
+        #     loss_smooth = (1.0 - cos_sim).mean()
 
         # loss_vel = self.velocity_direction_loss(y_hat_best, y)
         # loss_vel = self.velocity_avg_loss(y_hat_best, y)
         # loss_vel = self.bezier_velocity_direction_loss_from_ctrl(pred_ctrl[torch.arange(y_hat.shape[0]), best_mode], y)
 
         # ctrl_loss = self.c1_continuity_loss(pred_ctrl[torch.arange(y_hat.shape[0]), best_mode])
-        # bezier = data['bezier_points'][:, 0]
-        # bezier_loss = F.mse_loss(pred_ctrl[torch.arange(y_hat.shape[0]), best_mode], bezier)
+        bezier = data['bezier_points']
+        bezier_loss = F.smooth_l1_loss(pred_ctrl[torch.arange(y_hat.shape[0]), best_mode], bezier)
         loss = agent_reg_loss 
         + agent_cls_loss 
         + others_reg_loss 
         + new_agent_reg_loss 
         + 1 * loss_smooth
+        + 1 * bezier_loss
         # + 1 * loss_vel
         # + 1 * ctrl_loss
-        # + 1 * bezier_loss
+        
 
         disp_dict = {
             f'{tag}loss': loss.item(),
             f'{tag}reg_loss': agent_reg_loss.item(),
             f'{tag}cls_loss': agent_cls_loss.item(),
             f'{tag}others_reg_loss': others_reg_loss.item(),
+            f'{tag}control_loss': bezier_loss.item(),
             # f'{tag}smooth_loss': loss_smooth.item(),
             # f'{tag}vel_loss': loss_vel.item(),
             # f'{tag}ctrl_loss': ctrl_loss.item(),

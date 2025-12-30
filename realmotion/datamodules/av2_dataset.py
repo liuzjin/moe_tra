@@ -15,6 +15,8 @@ class Av2Dataset(Dataset):
         radius: float = 150.0,
         map_radius: float = 40.0,
         n_step: int = 10,
+        degree: int = 3,
+        num_control_points=12,
         logger=None,
     ):
         # assert split_points[-1] == 50 and num_historical_steps <= 50
@@ -29,6 +31,9 @@ class Av2Dataset(Dataset):
         self.radius = radius
         self.map_radius = map_radius
         self.split_points = split_points
+        self.num_control_points = num_control_points
+        self.degree = degree
+        self.M = self.get_bspline_matrix_with_offset(self.num_future_steps + 1)
 
         if logger is not None:
             logger.info(f'data root: {data_root}/{split}, total number of files: {len(self.file_list)}')
@@ -259,7 +264,7 @@ class Av2Dataset(Dataset):
         )
         vel[:, 0] = torch.zeros(vel.size(0))
 
-        bezier_points = self.fit_bezier_control_points(target,target_mask,n_segments=3,bezier_points=4)
+        bezier_points = self.fit_bspline_correct_alignment(target[0]).unsqueeze(0)
 
         
         return {
@@ -290,116 +295,112 @@ class Av2Dataset(Dataset):
             'bezier_points': bezier_points,
         }
 
-    def fit_bezier_control_points(self,
-        traj: torch.Tensor,
-        mask: torch.Tensor,
-        n_segments: int = 3,
-        bezier_points: int = 4
-    ) -> torch.Tensor:
+
+    def get_bspline_matrix_with_offset(self, total_steps, device='cpu'):
         """
-        从多条带掩码的轨迹批量拟合多段贝塞尔控制点
+        生成针对 T+1 个点的基矩阵 (修正版)
+        最终输出形状: [total_steps, num_control_points]
+        """
+        t = torch.linspace(0, 1, total_steps, device=device)
+        
+        # 1. 节点向量 (Knots)
+        # 节点总数 m = N + p + 1
+        m = self.num_control_points + self.degree + 1
+        num_inner = m - 2 * (self.degree + 1)
+        
+        inner_knots = torch.linspace(0, 1, num_inner + 2, device=device)[1:-1]
+        knots = torch.cat([
+            torch.zeros(self.degree + 1, device=device),
+            inner_knots,
+            torch.ones(self.degree + 1, device=device)
+        ])
+        
+        # 2. 初始化 0 阶基函数
+        # 关键修正：为了得到 N 个 p 阶基函数，我们需要 N + p 个 0 阶基函数
+        num_basis_0 = self.num_control_points +self. degree
+        basis = torch.zeros(num_basis_0, total_steps, device=device)
+        
+        # 计算 N_{i,0}(t)
+        for i in range(num_basis_0):
+            # 区间 [knots[i], knots[i+1])
+            mask = (t >= knots[i]) & (t < knots[i+1])
+            # 处理 t=1.0 的边界情况 (属于最后一个非零区间)
+            if knots[i+1] == 1.0: 
+                mask = mask | (t == 1.0)
+            basis[i, mask] = 1.0
+            
+        # 3. 递归升阶
+        current_num_basis = num_basis_0
+        
+        for d in range(1, self.degree + 1):
+            # 每一轮升阶，基函数数量减少 1
+            current_num_basis -= 1
+            new_basis = torch.zeros(current_num_basis, total_steps, device=device)
+            
+            for i in range(current_num_basis):
+                # Term 1: (t - u_i) / (u_{i+d} - u_i) * N_{i, d-1}
+                numer1 = (t - knots[i])
+                denom1 = (knots[i+d] - knots[i])
+                term1 = 0.0
+                if denom1 != 0:
+                    term1 = (numer1 / denom1) * basis[i]
+                
+                # Term 2: (u_{i+d+1} - t) / (u_{i+d+1} - u_{i+1}) * N_{i+1, d-1}
+                numer2 = (knots[i+d+1] - t)
+                denom2 = (knots[i+d+1] - knots[i+1])
+                term2 = 0.0
+                if denom2 != 0:
+                    term2 = (numer2 / denom2) * basis[i+1]
+                    
+                new_basis[i] = term1 + term2
+                
+            basis = new_basis
+
+        # 此时 basis 的形状应该是 [num_control_points, total_steps]
+        # 转置为 [total_steps, num_control_points]
+        return basis.t()
+
+    def fit_bspline_correct_alignment(self,traj, lambd=0.01):
+        """
+        修正版：处理 t=0 的对齐问题
         
         Args:
-            traj: [N, T, 2] —— 轨迹
-            mask: [N, T]    —— 1 表示有效，0 表示无效
-            n_segments: 分段数
-            bezier_points: 每段控制点数
-        
+            traj: [T, 2] 未来的真实轨迹 (不包含 0,0)
         Returns:
-            ctrl_points: [N, n_segments, bezier_points, 2]
+            final_ctrl_points: [N, 2] 其中 C0 必定是 (0,0)
         """
-        assert bezier_points >= 2, "At least 2 control points (linear)"
-        N, T, _ = traj.shape
         device = traj.device
-        dtype = traj.dtype
+        N = self.num_control_points
+        
+        # 1. 在轨迹最前面补一个 (0,0)
+        # now traj_full is [T+1, 2], starting at 0.0
+        zero_point = torch.zeros(1, 2, device=device)
+        traj_full = torch.cat([zero_point, traj], dim=0) 
+        
+        
+        # 分解计算
+        P0 = traj_full[0] # (0,0)
+        M0 = self.M[:, 0]      # [T+1]
+        M_rest = self.M[:, 1:] # [T+1, N-1]
+        
+        # target = P_full - M0 * P0
+        target_Y = traj_full - M0.unsqueeze(1) * P0.unsqueeze(0)
+        
+        # 4. Ridge Regression
+        XtX = torch.matmul(M_rest.t(), M_rest) # [N-1, N-1]
+        reg_I = lambd * torch.eye(N - 1, device=device)
+        
+        A = XtX + reg_I
+        B = torch.matmul(M_rest.t(), target_Y) # [N-1, 2]
+        
+        # Solve C_rest
+        C_rest = torch.linalg.solve(A, B)
+        
+        # 5. 拼接
+        final_ctrl_points = torch.cat([P0.unsqueeze(0), C_rest], dim=0)
+        
+        return final_ctrl_points
 
-        # 初始化输出
-        ctrl_points = torch.zeros(N, n_segments, bezier_points, 2, dtype=dtype, device=device)
-
-        for i in range(N):
-            valid_mask = mask[i]  # [T]
-            if valid_mask.sum() < 2:
-                # 有效点不足，跳过（保持零初始化）
-                continue
-
-            # 找到最后一个有效索引（假设有效点是连续前缀）
-            # 方法：反向找第一个 True
-            last_valid_idx = torch.where(valid_mask)[0].max().item()
-            valid_traj = traj[i, :last_valid_idx + 1]  # [T_valid, 2]
-            T_valid = valid_traj.shape[0]
-
-            if T_valid < 2:
-                continue
-
-            # === 以下逻辑与之前相同，但作用于 valid_traj ===
-            base_len = T_valid // n_segments
-            remainder = T_valid % n_segments
-            start = 0
-
-            for seg in range(n_segments):
-                n_pts = base_len + (1 if seg < remainder else 0)
-                end = start + n_pts
-
-                if n_pts < 2:
-                    try:
-                        P0 = valid_traj[start:start+1]  # [1, 2]
-                        ctrl_points[i, seg] = P0.repeat(bezier_points, 1)
-                    except:
-                        continue
-                   
-                else:
-                    seg_traj = valid_traj[start:end]  # [n_pts, 2]
-                    P0 = seg_traj[0]
-                    P_last = seg_traj[-1]
-
-                    if bezier_points == 2:
-                        ctrl_points[i, seg, 0] = P0
-                        ctrl_points[i, seg, 1] = P_last
-                    elif bezier_points == 3:
-                        if n_pts > 2:
-                            dir_start = seg_traj[1] - seg_traj[0]
-                            dir_end = seg_traj[-1] - seg_traj[-2]
-                            tangent = (dir_start + dir_end) / 2.0
-                        else:
-                            tangent = P_last - P0
-
-                        mid_point = (P0 + P_last) / 2.0
-                        chord_len = torch.norm(P_last - P0, keepdim=True) + 1e-6
-                        offset = tangent / (torch.norm(tangent, keepdim=True) + 1e-6) * (chord_len / 3.0)
-                        P1 = mid_point + offset
-
-                        ctrl_points[i, seg, 0] = P0
-                        ctrl_points[i, seg, 1] = P1
-                        ctrl_points[i, seg, 2] = P_last
-                    else:
-                        ctrl_points[i, seg, 0] = P0
-                        ctrl_points[i, seg, -1] = P_last
-
-                        for k in range(1, bezier_points - 1):
-                            t_local = k / (bezier_points - 1)
-                            idx_float = t_local * (n_pts - 1)
-                            idx_low = int(idx_float)
-                            idx_high = min(idx_low + 1, n_pts - 1)
-                            w = idx_float - idx_low
-
-                            pt = (1 - w) * seg_traj[idx_low] + w * seg_traj[idx_high]
-
-                            if idx_low == 0:
-                                tangent = seg_traj[1] - seg_traj[0]
-                            elif idx_high == n_pts - 1:
-                                tangent = seg_traj[-1] - seg_traj[-2]
-                            else:
-                                tangent = seg_traj[idx_high] - seg_traj[idx_low]
-
-                            chord_len = torch.norm(P_last - P0, keepdim=True) + 1e-6
-                            alpha = chord_len / (bezier_points * 2.0)
-                            ctrl_pt = pt + tangent / (torch.norm(tangent, keepdim=True) + 1e-6) * alpha
-
-                            ctrl_points[i, seg, k] = ctrl_pt
-
-                start = end
-
-        return ctrl_points  # [N, n_segments, bezier_points, 2]
 def collate_fn(seq_batch):
     """
     处理批次数据，每条数据是一个字典（而非列表）
@@ -444,8 +445,8 @@ def collate_fn(seq_batch):
                 [b['target_mask'] for b in batch], batch_first=True, padding_value=False
             )
         if batch[0]['bezier_points'] is not None:
-            data['bezier_points'] = pad_sequence(
-                [b['bezier_points'] for b in batch], batch_first=True
+            data['bezier_points'] = torch.cat(
+                [b['bezier_points'] for b in batch], dim=0
             )
         
         # 处理掩码字段

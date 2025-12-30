@@ -21,7 +21,7 @@ pl_module:
     mlp_drop: 0.0
     moe: False
     his_embed_moe: [False, False, False, False]
-    moe_type: "time_bezier"
+    moe_type: "bspline"
     query_cross_layers: 2
     query_self_atten: True
     query_self_layers: 1
@@ -32,9 +32,9 @@ pl_module:
     depths: [2, 2, 2, 2]
     his_num_heads: [2, 4, 8, 16]
     out_indices: [0, 1, 2, 3]
-    bezier_points: 3
+    bezier_points: ${degree}
     num_bezier_segments: 3
-    num_control_points: 12
+    num_control_points: ${num_control_points}
   optim:
     lr: 1.36e-3
     weight_decay: 1e-2

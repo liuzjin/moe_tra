@@ -32,8 +32,8 @@ pl_module:
     depths: [2, 2, 2, 2]
     his_num_heads: [2, 4, 8, 16]
     out_indices: [0, 1, 2, 3]
-    bezier_points: 3
-    num_control_points: 12
+    bezier_points: ${degree}
+    num_control_points: ${num_control_points}
   optim:
     lr: 1.36e-3
     weight_decay: 1e-2
